@@ -17,12 +17,17 @@ import { collectUsageFromJsonLines } from "./usage.js";
 import type { RunResult } from "./types.js";
 import { validateResultObject } from "./validate-result.js";
 import { portHasListener, unavailableAppVerification, verifyGeneratedApp } from "./verify-app.js";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants as fileConstants, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+
+export type AgentKind = "python" | "pi";
 
 interface Arguments {
   ideaFile: string;
   outputDirectory: string;
   prepareOnly: boolean;
   skipAppInstall: boolean;
+  agent: AgentKind;
 }
 
 export interface CommandResult {
@@ -46,6 +51,7 @@ function printHelp(): void {
   console.log(`Usage: npm run challenge -- [options]
 
 Options:
+  --agent <python|pi>     Orchestrator that drives Pi (default: python, env CHALLENGE_AGENT)
   --idea-file <path>      Idea prompt file (default: contract-public/development-idea.txt)
   --output-dir <path>     Generated app directory below output/ (default: output/app)
   --prepare-only          Reset the app from the seed without invoking Pi
@@ -57,6 +63,8 @@ Environment:
   CHALLENGE_MODEL         Optional Pi model override
   CHALLENGE_THINKING      Optional Pi thinking level (default: off)
   CHALLENGE_TIMEOUT_MS    Wall-clock limit for Pi (default: 900000)
+  HARNESS_PYTHON          Python interpreter for the harness agent (default: python3 on PATH);
+                          it must be able to run "-c 'import harness'" from the repository root
 `);
 }
 
@@ -66,6 +74,7 @@ export function parseArguments(argv: string[]): Arguments {
     outputDirectory: path.join("output", "app"),
     prepareOnly: false,
     skipAppInstall: false,
+    agent: process.env.CHALLENGE_AGENT === "pi" ? "pi" : "python",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -80,6 +89,14 @@ export function parseArguments(argv: string[]): Arguments {
     }
     if (argument === "--skip-app-install") {
       parsed.skipAppInstall = true;
+      continue;
+    }
+    if (argument === "--agent") {
+      const value = argv[index + 1];
+      if (!value) throw new Error(`Missing value for ${argument}`);
+      if (value !== "python" && value !== "pi") throw new Error(`Unknown agent: ${value}`);
+      parsed.agent = value;
+      index += 1;
       continue;
     }
     if (argument === "--idea-file" || argument === "--output-dir") {
@@ -264,7 +281,29 @@ async function main(): Promise<void> {
   const eventFile = path.join(artifactDirectory, "events.jsonl");
   const stderrFile = path.join(artifactDirectory, "pi.stderr.log");
   const appPortHadListenerBeforePi = await portHasListener(APP_PORT);
-  const pi = await runPi(
+  const harnessInterpreter =
+    args.agent === "python" ? resolveHarnessInterpreter(REPOSITORY_ROOT, process.env) : undefined;
+  if (args.agent === "python" && harnessInterpreter === undefined) {
+    console.error(
+      `Harness interpreter unresolved; falling back to the direct Pi agent. Probed: ${harnessInterpreterProbeSummary(REPOSITORY_ROOT, process.env)}`,
+    );
+  }
+  const pi = harnessInterpreter ? await runHarness(
+    harnessInterpreter,
+    buildHarnessArguments(
+      args.ideaFile,
+      path.join(artifactDirectory, "sessions"),
+      outputDirectory,
+      timeoutFromEnvironment(),
+      REPOSITORY_ROOT,
+      process.env,
+    ),
+    REPOSITORY_ROOT,
+    eventFile,
+    stderrFile,
+    timeoutFromEnvironment(),
+    harnessChildEnvironment(process.env, REPOSITORY_ROOT, process.stderr.isTTY === true && !process.env.NO_COLOR),
+  ) : await runPi(
     buildPiArguments(idea, systemPrompt, publicJourneys, appContext, artifactDirectory),
     outputDirectory,
     eventFile,
@@ -314,6 +353,313 @@ async function main(): Promise<void> {
   }
   if (pi.timedOut) console.error("Pi exceeded CHALLENGE_TIMEOUT_MS and was terminated.");
   if (runRequiresFailureExit(pi.exitCode, result.status, missingResultPaths)) process.exitCode = 1;
+}
+
+/**
+ * Additive harness seam. Nothing below is reachable unless `--agent python`
+ * (or `CHALLENGE_AGENT=python`, the default) resolves a Python interpreter;
+ * every other path keeps the starter's `runPi` behaviour byte for byte.
+ */
+
+/** Head start the Python harness must keep over the runner's own SIGTERM timer. */
+export const HARNESS_SHUTDOWN_MARGIN_MS = 30_000;
+
+function harnessInterpreterNames(): string[] {
+  return process.platform === "win32" ? ["python3.exe", "python.exe"] : ["python3"];
+}
+
+function extractedHarnessInterpreter(repositoryRoot: string): string {
+  return path.join(
+    repositoryRoot,
+    "artifacts",
+    "python",
+    `${process.platform}-${process.arch}`,
+    "bin",
+    process.platform === "win32" ? "python.exe" : "python3",
+  );
+}
+
+/** python-build-standalone names its archives with the GNU architecture, not Node's. */
+function standaloneArchitecture(architecture: string): string {
+  if (architecture === "x64") return "x86_64";
+  if (architecture === "arm64") return "aarch64";
+  return architecture;
+}
+
+function vendoredHarnessArchive(repositoryRoot: string): string {
+  return path.join(
+    repositoryRoot,
+    "vendor",
+    "python",
+    `cpython-${standaloneArchitecture(process.arch)}-unknown-linux-gnu-install_only.tar.gz`,
+  );
+}
+
+/** Human-readable list of the locations `resolveHarnessInterpreter` probes, in order. */
+export function harnessInterpreterProbeSummary(repositoryRoot: string, env: NodeJS.ProcessEnv): string {
+  return [
+    `HARNESS_PYTHON=${env.HARNESS_PYTHON ?? "<unset>"}`,
+    `${harnessInterpreterNames().join("|")} on PATH`,
+    extractedHarnessInterpreter(repositoryRoot),
+    vendoredHarnessArchive(repositoryRoot),
+  ].join(", ");
+}
+
+function isExecutableFile(candidate: string): boolean {
+  try {
+    accessSync(candidate, fileConstants.X_OK);
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isRegularFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Milliseconds allowed for the one-shot `import harness` probe of a candidate. */
+const HARNESS_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * The executable bit alone proves nothing: a pyenv/venv shim whose target was
+ * removed still passes `accessSync(X_OK)` and then makes `spawn` emit `error`,
+ * which rejects `runHarness` out of an unguarded `main()` and leaves *no*
+ * `result.json` at either required path. Probing with the child's own
+ * environment also proves the candidate can actually import the package, so an
+ * interpreter that starts but cannot see `harness/` falls back to `runPi`
+ * instead of producing a failed run.
+ */
+function canRunHarnessModule(
+  candidate: string,
+  repositoryRoot: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (!isExecutableFile(candidate)) return false;
+  const probe = spawnSync(candidate, ["-c", "import harness"], {
+    cwd: repositoryRoot,
+    env: harnessChildEnvironment(env, repositoryRoot, false),
+    killSignal: "SIGKILL",
+    shell: false,
+    stdio: "ignore",
+    timeout: HARNESS_PROBE_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  return probe.error === undefined && probe.status === 0;
+}
+
+/**
+ * Resolves the interpreter that runs `-m harness`: `HARNESS_PYTHON`, then
+ * `python3` on `PATH`, then a previously extracted standalone build, then a
+ * one-shot extraction of the vendored `.tar.gz` (the judged image has neither
+ * xz nor zstd). Every candidate must survive an `import harness` probe. Returns
+ * `undefined` instead of throwing so the caller can fall back to `runPi`; it
+ * must therefore run before any `wx` stream is opened.
+ */
+export function resolveHarnessInterpreter(
+  repositoryRoot: string,
+  env: NodeJS.ProcessEnv,
+  isExecutable: (candidate: string) => boolean = (candidate) =>
+    canRunHarnessModule(candidate, repositoryRoot, env),
+): string | undefined {
+  try {
+    const explicit = env.HARNESS_PYTHON;
+    if (explicit !== undefined && explicit !== "" && isExecutable(explicit)) return explicit;
+
+    for (const entry of (env.PATH ?? "").split(path.delimiter)) {
+      if (entry === "") continue;
+      for (const name of harnessInterpreterNames()) {
+        const candidate = path.join(entry, name);
+        if (isExecutable(candidate)) return candidate;
+      }
+    }
+
+    const extracted = extractedHarnessInterpreter(repositoryRoot);
+    if (isExecutable(extracted)) return extracted;
+
+    const archive = vendoredHarnessArchive(repositoryRoot);
+    if (!isRegularFile(archive)) return undefined;
+
+    const installRoot = path.dirname(path.dirname(extracted));
+    const staging = `${installRoot}.staging-${process.pid}`;
+    rmSync(staging, { force: true, recursive: true });
+    mkdirSync(staging, { recursive: true });
+    const extraction = spawnSync("tar", ["-xzf", archive, "--strip-components=1", "-C", staging], {
+      shell: false,
+    });
+    if (extraction.status !== 0) {
+      rmSync(staging, { force: true, recursive: true });
+      return undefined;
+    }
+    renameSync(staging, installRoot);
+    return isExecutable(extracted) ? extracted : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Pi's exact, case-sensitive set (`dist/cli/args.js`); anything else warns and falls back. */
+const VALID_THINKING_LEVELS: readonly string[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/**
+ * An invalid `--thinking` makes Pi print a warning, ignore the flag and use its
+ * own configured default (`medium`), so an empty or misspelled organizer value
+ * would silently turn thinking on for a judged run — the largest measured cost
+ * lever. Anything unrecognised becomes `off`; a valid organizer choice is never
+ * overridden.
+ */
+export function normalizeThinkingLevel(raw: string | undefined): string {
+  const candidate = (raw ?? "").trim().toLowerCase();
+  if (candidate === "") return "off";
+  if (VALID_THINKING_LEVELS.includes(candidate)) return candidate;
+  process.stderr.write(`[harness] ignoring invalid CHALLENGE_THINKING "${raw}"; using "off"\n`);
+  return "off";
+}
+
+/**
+ * Arguments for `<interpreter> -m harness`. The harness deadline is strictly
+ * smaller than the runner's so Python can close its Pi sessions by EOF before
+ * the runner escalates to SIGTERM.
+ */
+export function buildHarnessArguments(
+  ideaFile: string,
+  sessionRoot: string,
+  appDirectory: string,
+  timeoutMs: number,
+  repositoryRoot: string,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const args = [
+    "-m",
+    "harness",
+    "--idea-file",
+    path.resolve(ideaFile),
+    "--session-root",
+    path.resolve(sessionRoot),
+    "--cwd",
+    path.resolve(appDirectory),
+    "--timeout-ms",
+    String(Math.max(1_000, timeoutMs - HARNESS_SHUTDOWN_MARGIN_MS)),
+    "--repo-root",
+    path.resolve(repositoryRoot),
+    "--thinking",
+    normalizeThinkingLevel(env.CHALLENGE_THINKING),
+  ];
+  if (env.CHALLENGE_PROVIDER) args.push("--provider", env.CHALLENGE_PROVIDER);
+  if (env.CHALLENGE_MODEL) args.push("--model", env.CHALLENGE_MODEL);
+  return args;
+}
+
+/**
+ * Environment for the harness child. Every organizer-supplied key survives
+ * verbatim; only the Python bootstrap variables are forced. `PI_CODING_AGENT_DIR`
+ * is never invented — a relative one is merely resolved against the repository
+ * root, because the harness child runs with a different working directory.
+ */
+export function harnessChildEnvironment(
+  parentEnv: NodeJS.ProcessEnv,
+  repositoryRoot: string,
+  colorized: boolean,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...parentEnv };
+  env.PI_OFFLINE = "1";
+  env.PYTHONUNBUFFERED = "1";
+  env.PYTHONDONTWRITEBYTECODE = "1";
+  env.PYTHONNOUSERSITE = "1";
+  const inheritedPythonPath = parentEnv.PYTHONPATH;
+  env.PYTHONPATH =
+    inheritedPythonPath === undefined || inheritedPythonPath === ""
+      ? repositoryRoot
+      : [repositoryRoot, inheritedPythonPath].join(path.delimiter);
+  if (colorized) env.HARNESS_COLOR = "1";
+  else delete env.HARNESS_COLOR;
+  const agentDirectory = parentEnv.PI_CODING_AGENT_DIR;
+  if (agentDirectory !== undefined && agentDirectory !== "" && !path.isAbsolute(agentDirectory)) {
+    env.PI_CODING_AGENT_DIR = path.resolve(repositoryRoot, agentDirectory);
+  }
+  delete env.PYTHONSAFEPATH;
+  delete env.PYTHONHOME;
+  delete env.PYTHONSTARTUP;
+  return env;
+}
+
+/**
+ * `runPi` for the harness interpreter: same event/stderr files, same `wx`
+ * semantics, same process-group timeout escalation. Interpreter, arguments and
+ * environment are parameters so every behaviour here is testable without Python.
+ */
+export async function runHarness(
+  interpreter: string,
+  args: string[],
+  cwd: string,
+  eventFile: string,
+  stderrFile: string,
+  timeoutMs: number,
+  env: NodeJS.ProcessEnv,
+): Promise<CommandResult> {
+  const events = createWriteStream(eventFile, { flags: "wx" });
+  const errors = createWriteStream(stderrFile, { flags: "wx" });
+  let lineBuffer = "";
+  let harnessChild: ReturnType<typeof spawn> | undefined;
+
+  try {
+    return await new Promise<CommandResult>((resolve, reject) => {
+      const child = spawn(interpreter, args, {
+        cwd,
+        detached: usesDetachedProcessGroup(),
+        env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      harnessChild = child;
+      let timedOut = false;
+      let killTimer: NodeJS.Timeout | undefined;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        signalProcessTree(child, "SIGTERM");
+        killTimer = setTimeout(() => signalProcessTree(child, "SIGKILL"), 5_000);
+      }, timeoutMs);
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        events.write(chunk);
+        lineBuffer += chunk.toString("utf8");
+        const lines = lineBuffer.split(/\r?\n/u);
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) summarizeEventLine(line);
+      });
+      child.stderr.pipe(errors);
+      child.stderr.pipe(process.stderr);
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        reject(error);
+      });
+      child.once("close", (code) => {
+        clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        if (lineBuffer !== "") summarizeEventLine(lineBuffer);
+        resolve({ exitCode: timedOut ? 124 : (code ?? 1), timedOut });
+      });
+    });
+  } finally {
+    if (harnessChild) await terminateProcessTree(harnessChild);
+    await Promise.all([
+      new Promise<void>((resolve) => events.end(resolve)),
+      new Promise<void>((resolve) => errors.end(resolve)),
+    ]);
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

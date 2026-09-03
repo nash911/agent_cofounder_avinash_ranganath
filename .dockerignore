@@ -1,6 +1,14 @@
 .git
 .env
 .env.*
+.hunknote
+.idea/
+temp/
+results/
+tools/
+evals/holdout/
+docs/BUILD_PLAN.md
+docs/PHASE1_READINESS.md
 node_modules
 .npm-cache
 app-template/node_modules
@@ -8,3 +16,19 @@ app-template/dist
 artifacts
 output
 coverage
+**/__pycache__/
+*.pyc
+# Only the two committed Pi config files ship. Everything else Pi writes into the
+# config directory under a local PI_CODING_AGENT_DIR -- auth.json (credentials on
+# /login), models-store.json, sessions/, pi-debug.log, trust.json -- must never
+# enter the build context; .gitignore is a separate mechanism Docker does not
+# read. What does ship is inert: Pi reads it only when PI_CODING_AGENT_DIR points
+# at it, and the harness never sets that variable, so the organizers' own Pi
+# configuration always wins inside the judged image.
+.pi-agent/**
+!.pi-agent/models.json
+!.pi-agent/settings.json
+
+# Written by the runner. prepareOutput() unlinks a stale copy at run start, so
+# this is belt-and-braces; it still should not ride into the image.
+result.json

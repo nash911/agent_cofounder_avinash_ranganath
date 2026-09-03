@@ -1,0 +1,65 @@
+{
+  "providers": {
+    "berget": {
+      "baseUrl": "https://api.berget.ai/v1",
+      "api": "openai-completions",
+      "apiKey": "$BERGET_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsStore": false,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "chat-template",
+        "chatTemplateKwargs": {
+          "enable_thinking": {
+            "$var": "thinking.enabled"
+          }
+        }
+      },
+      "models": [
+        {
+          "id": "zai-org/GLM-5.2",
+          "name": "GLM-5.2 (Berget)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 200000,
+          "maxTokens": 32768,
+          "cost": {
+            "input": 1.4,
+            "output": 4.4,
+            "cacheRead": 1.4,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "Qwen/Qwen3.8-27B-FP8",
+          "name": "Qwen 3.8 27B (Berget)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 32768,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "zai-org/GLM-5.3-Flash",
+          "name": "GLM-5.3 Flash (Berget)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 200000,
+          "maxTokens": 32768,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}

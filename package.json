@@ -11,6 +11,7 @@
     "challenge": "node --import tsx src/run-challenge.ts",
     "validate:result": "node --import tsx src/validate-result.ts",
     "typecheck": "tsc --noEmit",
+    "check:runtime": "node --import tsx solution/tools/check-runtime.ts",
     "test": "vitest run",
     "app:test": "npm --prefix app-template test -- --passWithNoTests",
     "app:build": "npm --prefix app-template run build",

@@ -1,3 +1,5 @@
+# Development image: identical to Dockerfile minus the "npm run check" layer,
+# which costs ~217s per iteration. Never used for judging.
 FROM node:22.19.0-bookworm-slim
 
 WORKDIR /challenge
@@ -17,8 +19,7 @@ RUN apt-get update \
 ENV PYTHONDONTWRITEBYTECODE=1
 
 COPY . .
-RUN npm run check \
-    && mkdir -p output artifacts \
+RUN mkdir -p output artifacts \
     && chown -R node:node /challenge
 
 EXPOSE 3000

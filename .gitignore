@@ -14,3 +14,17 @@ output/*
 app-template/node_modules/
 app-template/dist/
 coverage/
+
+# Project specific
+.hunknote/
+.idea/
+temp/
+
+# Pi writes credentials into the config directory on /login; the committed
+# .pi-agent/ holds only models.json and settings.json.
+.pi-agent/auth.json
+.pi-agent/models-store.json
+
+# Python bytecode from the harness package (PYTHONDONTWRITEBYTECODE=1 in judged runs).
+__pycache__/
+*.py[cod]

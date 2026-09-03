@@ -47,6 +47,39 @@ The strict Node engine is intentional. `npm ci` fails on Node 23+ (including Nod
 
 The Docker build runs the full check suite, including short-lived Vite servers over the builder's loopback interface. The image declares port 3000 for organizer-controlled browser evaluation; publishing that port still requires an explicit container port mapping or shared container network.
 
+## Local provider configuration
+
+Development against Berget uses a repository-local Pi configuration directory,
+`.pi-agent/`, holding `models.json` (the `berget` provider and its three models)
+and `settings.json` (`quietStartup`, `defaultThinkingLevel: off`). No credential
+is committed: `models.json` references `$BERGET_API_KEY`, which Pi interpolates
+from the environment.
+
+Pi only reads that directory when `PI_CODING_AGENT_DIR` points at it, and the
+variable must be an absolute path. Set it locally, never in the judged
+environment:
+
+```bash
+export PI_CODING_AGENT_DIR="$PWD/.pi-agent"
+export BERGET_API_KEY="…"
+node_modules/.bin/pi --offline --no-extensions --list-models
+```
+
+Pi's default configuration directory is `~/.pi/agent`, so the presence of
+`.pi-agent/` in the image is inert; the organizers' own Pi configuration and
+their `CHALLENGE_PROVIDER` / `CHALLENGE_MODEL` values continue to win. Harness
+code never sets `PI_CODING_AGENT_DIR`.
+
+`solution/extensions/thinking-guard.ts` is loaded by explicit `--extension` path
+(explicit paths survive `--no-extensions`). On `before_provider_request` it adds
+`chat_template_kwargs: {"enable_thinking": <level !== "off">}` when the payload
+carries no thinking field of its own and the endpoint is not a known first-party
+host, so an OpenAI-compatible vLLM deployment registered under an unexpected
+provider name still receives an explicit "thinking off". It takes the level from
+Pi's live session state, falling back to `CHALLENGE_THINKING` and then to `off`.
+Set `HARNESS_THINKING_GUARD=0` to disable it, and `HARNESS_PAYLOAD_LOG=<path>`
+to append one JSON line per decision.
+
 ## Run the public challenge
 
 The runner uses `contract-public/development-idea.txt` by default. During template development it contains a placeholder; organizers must replace that file with the finalized public prompt before participant distribution.
