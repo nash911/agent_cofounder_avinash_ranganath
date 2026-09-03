@@ -211,9 +211,12 @@ class SubprocessWiringTest(unittest.TestCase):
         )
         self.assertEqual(code, 0, stderr)
         payload = json.loads((app_dir / "report.partial.json").read_text(encoding="utf-8"))
+        # The model's prose survives the green observation ...
         self.assertEqual(payload["summary"], "fake pi report", stderr)
-        self.assertNotIn("creates a record", json.dumps(payload))
         self.assertIn("written by the model; leaving it untouched", stderr)
+        # ... and its empty tests_run is repaired from the vitest JSON at shutdown.
+        self.assertEqual([e["journey"] for e in payload["tests_run"]], ["creates a record"], stderr)
+        self.assertIn("repaired tests_run from vitest (1 entries)", stderr)
 
     def test_a_run_with_no_green_tests_still_writes_budget_json_but_no_report(self):
         app_dir = _copy_app_template(self.root)

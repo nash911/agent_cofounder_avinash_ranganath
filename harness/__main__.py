@@ -665,6 +665,13 @@ def run(args: argparse.Namespace) -> int:
         )
     else:
         report_watcher.join(2.0)
+        # The model finished and wrote its own report. If its tests_run entries
+        # are not in the runner's shape (measured slip: {name, status}), the
+        # runner drops them all and degrades a green run to partial. Fill that
+        # one field from the real vitest JSON; keep everything else the model wrote.
+        repaired = report_watcher.repair_model_report()
+        if repaired is not None:
+            log("report", "repaired tests_run from vitest ({0} entries); model prose kept".format(repaired))
 
     # -- prompt-prefix byte-identity check (C5) --------------------------
     prefix.check(payload_log_path(harness_directory))

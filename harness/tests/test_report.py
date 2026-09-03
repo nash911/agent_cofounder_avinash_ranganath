@@ -281,3 +281,58 @@ class AuthorshipGuardTest(unittest.TestCase):
         self.assertTrue(report.harness_authored(self.report_path, self.harness_dir))
         self.report_path.write_text("{}\n", encoding="utf-8")
         self.assertFalse(report.harness_authored(self.report_path, self.harness_dir))
+
+
+class RepairTestsRunTest(unittest.TestCase):
+    """A model report with malformed tests_run gets that one field repaired."""
+
+    GREEN = {"green": True, "total": 2, "passed": 2, "failed": 0, "names": ["adds a record", "edits a record"]}
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self._tmp.name)
+        self.app_dir = root / "app"
+        self.harness_dir = root / "harness"
+        self.app_dir.mkdir()
+        self.harness_dir.mkdir()
+        self.report_path = self.app_dir / "report.partial.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, payload):
+        self.report_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    def test_valid_tests_run_keeps_only_runner_shaped_entries(self):
+        entries = report.valid_tests_run([
+            {"command": "npm test", "journey": "ok", "result": "passed"},
+            {"name": "slip", "status": "passed"},
+            {"command": "npm test", "journey": "bad", "result": "pass"},
+            "junk",
+        ])
+        self.assertEqual(entries, [{"command": "npm test", "journey": "ok", "result": "passed"}])
+
+    def test_malformed_entries_are_replaced_and_prose_is_kept(self):
+        self._write({"status": "success", "summary": "the model's summary", "implemented_features": ["a"],
+                     "assumptions": ["b"], "tests_run": [{"name": "adds a record", "status": "passed"}]})
+        self.assertTrue(report.repair_tests_run(self.app_dir, self.harness_dir, self.GREEN))
+        payload = json.loads(self.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["summary"], "the model's summary")
+        self.assertEqual(payload["status"], "success")
+        self.assertEqual(payload["implemented_features"], ["a"])
+        self.assertEqual([e["journey"] for e in payload["tests_run"]], ["adds a record", "edits a record"])
+        self.assertTrue(all(e["command"] == "npm test" and e["result"] == "passed" for e in payload["tests_run"]))
+
+    def test_valid_entries_are_never_touched(self):
+        original = {"status": "success", "summary": "s", "implemented_features": [], "assumptions": [],
+                    "tests_run": [{"command": "npm test", "journey": "kept", "result": "passed"}]}
+        self._write(original)
+        before = self.report_path.read_bytes()
+        self.assertFalse(report.repair_tests_run(self.app_dir, self.harness_dir, self.GREEN))
+        self.assertEqual(self.report_path.read_bytes(), before)
+
+    def test_red_or_empty_observation_does_not_repair(self):
+        self._write({"status": "partial", "summary": "s", "tests_run": []})
+        self.assertFalse(report.repair_tests_run(self.app_dir, self.harness_dir, dict(self.GREEN, green=False)))
+        self.assertFalse(report.repair_tests_run(self.app_dir, self.harness_dir, dict(self.GREEN, names=[])))
+        self.assertEqual(json.loads(self.report_path.read_text(encoding="utf-8"))["tests_run"], [])

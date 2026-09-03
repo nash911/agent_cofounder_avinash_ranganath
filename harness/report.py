@@ -306,6 +306,80 @@ def write_report(
     return True
 
 
+VALID_RESULTS = ("passed", "failed")
+
+
+def valid_tests_run(value: Any) -> List[Dict[str, str]]:
+    """The entries the runner will keep: ``{command, journey, result}`` with a
+    string command and journey and a ``result`` of ``passed``/``failed`` --
+    mirroring ``normalizeTestRun`` in ``src/result.ts``. Anything else (the
+    measured slip was ``{name, status}``) is dropped by the runner, which then
+    degrades a fully green run to ``partial`` for want of a reported journey."""
+    kept: List[Dict[str, str]] = []
+    if not isinstance(value, list):
+        return kept
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        command, journey, result = item.get("command"), item.get("journey"), item.get("result")
+        if isinstance(command, str) and isinstance(journey, str) and result in VALID_RESULTS:
+            kept.append({"command": command, "journey": journey, "result": str(result)})
+    return kept
+
+
+def tests_run_from_observation(observation: Dict[str, Any]) -> List[Dict[str, str]]:
+    return [
+        {"command": "npm test", "journey": str(name), "result": "passed"}
+        for name in (observation.get("names") or [])
+    ]
+
+
+def repair_tests_run(
+    app_dir: PathLike,
+    harness_dir: Optional[PathLike],
+    observation: Dict[str, Any],
+) -> bool:
+    """Fill a model-authored report's ``tests_run`` from a green observation.
+
+    Only fires when the report on disk carries **no** runner-valid
+    ``tests_run`` entry and vitest just passed with at least one test. Every
+    other field the model wrote (status, summary, features, assumptions) is
+    preserved byte-for-byte in value; only ``tests_run`` changes.
+    """
+    report_path = pathlib.Path(app_dir) / "report.partial.json"
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if valid_tests_run(payload.get("tests_run")):
+        return False
+    if not observation.get("green") or not observation.get("names"):
+        return False
+    payload["tests_run"] = tests_run_from_observation(observation)
+    data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    tmp_path = report_path.with_name(report_path.name + ".harness-tmp")
+    try:
+        tmp_path.write_bytes(data)
+        os.replace(str(tmp_path), str(report_path))
+    except OSError as exc:
+        warn("could not repair report.partial.json: {0}".format(exc))
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        return False
+    digest = _sha256_bytes(data)
+    _LAST_WRITTEN[str(report_path)] = digest
+    if harness_dir is not None:
+        try:
+            (pathlib.Path(harness_dir) / _SIDECAR_NAME).write_text(digest + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    return True
+
+
 class ReportWatcher:
     """Live vitest-green detector plus the single-flight observe/write it drives.
 
@@ -392,6 +466,25 @@ class ReportWatcher:
             if remaining <= 0:
                 return
             thread.join(timeout=min(0.25, remaining))
+
+    def repair_model_report(self) -> Optional[int]:
+        """After a normal settle: if the model's report has no runner-valid
+        ``tests_run`` entry, observe once (capped) and fill it from vitest.
+        Returns the number of entries written, or ``None`` when nothing needed
+        repair (harness-authored report, valid entries, no report, or red)."""
+        report_path = self.app_dir / "report.partial.json"
+        if not report_path.is_file() or harness_authored(report_path, self.harness_dir):
+            return None
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict) or valid_tests_run(payload.get("tests_run")):
+            return None
+        observation = self.final_observe()
+        if repair_tests_run(self.app_dir, self.harness_dir, observation):
+            return len(observation.get("names") or [])
+        return None
 
     def final_observe(self) -> Dict[str, Any]:
         """One last, capped, synchronous observation at shutdown.
