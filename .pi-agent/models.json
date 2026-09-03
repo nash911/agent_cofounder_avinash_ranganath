@@ -8,6 +8,7 @@
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
         "supportsStore": false,
+        "supportsThinkingTokenBudget": true,
         "maxTokensField": "max_tokens",
         "thinkingFormat": "chat-template",
         "chatTemplateKwargs": {

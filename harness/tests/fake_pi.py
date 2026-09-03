@@ -29,6 +29,14 @@ Environment knobs
                          nothing), ``compaction_end``, a second assistant
                          ``message_end``, and only then ``agent_settled``.
 ``FAKE_PI_WRITE_REPORT=1`` write a minimal ``report.partial.json`` into the cwd.
+``FAKE_PI_GREEN_TESTS=1``  before the assistant ``message_end``, emit a
+                         ``tool_execution_start``/``tool_execution_end`` pair
+                         for a ``bash`` tool call whose result text looks like
+                         a green ``vitest`` summary, exactly the shape
+                         ``harness.report.ReportWatcher`` watches for.
+``FAKE_PI_OUTPUT_TOKENS=<n>`` the assistant ``message_end``'s ``usage.output``
+                         is ``<n>`` instead of the default ``42``, so budget
+                         tests can drive a specific cumulative-output number.
 """
 
 from __future__ import annotations
@@ -40,15 +48,29 @@ import signal
 import sys
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 BIG_LINE_BYTES = 100 * 1024
+
+#: Matches the ``provider``/``responseModel`` fields real Pi puts on an
+#: assistant ``message_end`` (src/usage.ts's ``callFromEvent``), so the
+#: derived call has a real, non-"unknown" model string.
+FAKE_PROVIDER = "fake-provider"
+FAKE_MODEL = "fake-model"
 
 _EMIT_LOCK = threading.Lock()
 _MIRROR: Optional[Any] = None
 
 _ABORTED = threading.Event()
 _SETTLED = threading.Event()
+
+#: Every assistant message this process emitted on stdout, in emission order,
+#: so ``_write_session_file`` can mirror them into ``session.jsonl`` with
+#: identical usage -- the audit artifact ``tools/verify-telemetry.ts`` reads
+#: (contract C9). Guarded by ``_EMIT_LOCK`` alongside the stdout writes.
+_ASSISTANT_MESSAGES: List[Dict[str, Any]] = []
 
 
 def _flag(name: str) -> bool:
@@ -75,6 +97,11 @@ def _open_mirror(session_dir: Optional[pathlib.Path]) -> None:
 
 def emit(event: Dict[str, Any]) -> None:
     """One record, one write, one flush -- the same rule the harness follows."""
+    if event.get("type") == "message_end":
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            with _EMIT_LOCK:
+                _ASSISTANT_MESSAGES.append(dict(message))
     payload = (json.dumps(event) + "\n").encode("utf-8")
     _emit_bytes(payload)
 
@@ -103,7 +130,13 @@ def _usage(output: int) -> Dict[str, Any]:
     }
 
 
+def _iso_now() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + "{0:03d}Z".format(now.microsecond // 1000)
+
+
 def _write_session_file(session_dir: Optional[pathlib.Path]) -> None:
+    """Session header + the initial (fake) user turn. Called once, at startup."""
     if session_dir is None:
         return
     try:
@@ -111,10 +144,73 @@ def _write_session_file(session_dir: Optional[pathlib.Path]) -> None:
         (session_dir / "fake-pi.pid").write_text(str(os.getpid()), encoding="utf-8")
         path = session_dir / "session.jsonl"
         with path.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "session", "id": "fake-session", "cwd": os.getcwd()}) + "\n")
             handle.write(
-                json.dumps({"type": "message", "message": {"role": "user", "content": "fake"}}) + "\n"
+                json.dumps(
+                    {
+                        "type": "session",
+                        "version": 3,
+                        "id": "fake-session",
+                        "timestamp": _iso_now(),
+                        "cwd": os.getcwd(),
+                    }
+                )
+                + "\n"
             )
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "id": "u0000001",
+                        "parentId": None,
+                        "timestamp": _iso_now(),
+                        "message": {"role": "user", "content": "fake", "timestamp": int(time.time() * 1000)},
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+def _finalize_session_file(session_dir: Optional[pathlib.Path]) -> None:
+    """Appends one ``message`` entry per assistant turn emitted on stdout.
+
+    Mirrors ``usage``/``stopReason`` byte for byte and carries the same
+    ``provider``/``model`` fields, so ``tools/verify-telemetry.ts`` -- which
+    derives its call list from ``session.jsonl`` alone, independent of
+    ``events.jsonl`` -- reconciles against what this process actually emitted
+    (contract C9). Called once, after every prompt has settled.
+    """
+    if session_dir is None:
+        return
+    with _EMIT_LOCK:
+        messages = list(_ASSISTANT_MESSAGES)
+    if not messages:
+        return
+    try:
+        path = session_dir / "session.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            parent = "u0000001"
+            for message in messages:
+                entry_id = uuid.uuid4().hex[:8]
+                session_message = dict(message)
+                session_message.setdefault("api", "fake")
+                session_message.setdefault("provider", FAKE_PROVIDER)
+                session_message.setdefault("model", FAKE_MODEL)
+                session_message.setdefault("timestamp", int(time.time() * 1000))
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "id": entry_id,
+                            "parentId": parent,
+                            "timestamp": _iso_now(),
+                            "message": session_message,
+                        }
+                    )
+                    + "\n"
+                )
+                parent = entry_id
     except OSError:
         pass
 
@@ -161,13 +257,46 @@ def _finish_prompt() -> None:
             }
         )
 
+    if _flag("FAKE_PI_GREEN_TESTS"):
+        emit(
+            {
+                "type": "tool_execution_start",
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "args": {"command": "npm test"},
+            }
+        )
+        emit(
+            {
+                "type": "tool_execution_end",
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "\n Test Files  1 passed (1)\n      Tests  3 passed (3)\n",
+                        }
+                    ]
+                },
+                "isError": False,
+            }
+        )
+
     global _PROMPTS_FINISHED
     _PROMPTS_FINISHED += 1
     error_once = _flag("FAKE_PI_ERROR_ONCE") and _PROMPTS_FINISHED == 1
+    try:
+        output_tokens = int(os.environ.get("FAKE_PI_OUTPUT_TOKENS") or 42)
+    except ValueError:
+        output_tokens = 42
     if _flag("FAKE_PI_ERROR") or error_once:
         message = {
             "role": "assistant",
             "content": [],
+            "provider": FAKE_PROVIDER,
+            "responseModel": FAKE_MODEL,
+            "model": FAKE_MODEL,
             "stopReason": "error",
             "errorMessage": '503 "Service Unavailable" (fake provider error)',
             "usage": _usage(0),
@@ -176,8 +305,11 @@ def _finish_prompt() -> None:
         message = {
             "role": "assistant",
             "content": [{"type": "text", "text": "ok"}],
+            "provider": FAKE_PROVIDER,
+            "responseModel": FAKE_MODEL,
+            "model": FAKE_MODEL,
             "stopReason": "stop",
-            "usage": _usage(42),
+            "usage": _usage(output_tokens),
         }
     emit({"type": "message_end", "message": message})
     emit({"type": "turn_end", "message": message})
@@ -203,6 +335,9 @@ def _finish_prompt() -> None:
         continued = {
             "role": "assistant",
             "content": [{"type": "text", "text": "built the rest"}],
+            "provider": FAKE_PROVIDER,
+            "responseModel": FAKE_MODEL,
+            "model": FAKE_MODEL,
             "stopReason": "stop",
             "usage": _usage(400),
         }
@@ -253,6 +388,9 @@ def _handle_abort(cid: Optional[str]) -> None:
     message = {
         "role": "assistant",
         "content": [],
+        "provider": FAKE_PROVIDER,
+        "responseModel": FAKE_MODEL,
+        "model": FAKE_MODEL,
         "stopReason": "aborted",
         "usage": _usage(0),
     }
@@ -305,6 +443,7 @@ def main(argv: List[str]) -> int:
 
     for worker in workers:
         worker.join(timeout=5.0)
+    _finalize_session_file(session_dir)
     if _MIRROR is not None:
         try:
             _MIRROR.close()

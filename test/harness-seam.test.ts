@@ -6,13 +6,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { usesDetachedProcessGroup } from "../src/process-tree.js";
 import {
   HARNESS_SHUTDOWN_MARGIN_MS,
+  annotateTelemetrySources,
   buildHarnessArguments,
   harnessChildEnvironment,
   parseArguments,
   resolveHarnessInterpreter,
   runHarness,
 } from "../src/run-challenge.js";
+import type { RunResult } from "../src/types.js";
 import { collectUsageFromJsonLines } from "../src/usage.js";
+import { validateResultObject } from "../src/validate-result.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryDirectories: string[] = [];
@@ -454,4 +457,63 @@ describe("runHarness process behaviour", () => {
     expect(captured.map((error) => error.code)).toContain("EEXIST");
     expect(await readFile(eventFile, "utf8")).toBe(firstLine);
   }, 20_000);
+});
+
+describe("annotateTelemetrySources (contract C8)", () => {
+  const baseResult: RunResult = {
+    status: "partial",
+    app_url: "http://localhost:3000",
+    start_command: "npm run dev",
+    summary: "A bookshelf tracker.",
+    implemented_features: ["Add a book"],
+    assumptions: [],
+    tests_run: [{ command: "npm test", journey: "Add a book", result: "passed" }],
+    harness_checks: [],
+    model_calls: 1,
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    total_tokens: 15,
+    reasoning_tokens: 0,
+    cost_total: 0,
+    call_log: [
+      {
+        index: 1,
+        model: "berget/zai-org/GLM-5.2",
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        total_tokens: 15,
+      },
+    ],
+    pi_exit_code: 0,
+    telemetry_source: "pi-json-event-stream",
+    port_reclamation: {
+      preexisting_listener: false,
+      listener_after_pi: false,
+      attempted: false,
+      reclaimed: false,
+      process_ids: [],
+      diagnostic: "no listener before or after Pi",
+    },
+  };
+
+  it("adds telemetry_sources and direct_call_count without touching the schema's telemetry_source const", () => {
+    const annotated = annotateTelemetrySources(baseResult, 4);
+    expect(annotated.telemetry_source).toBe("pi-json-event-stream");
+    expect(annotated.telemetry_sources).toEqual(["pi-json-event-stream", "direct-gateway"]);
+    expect(annotated.direct_call_count).toBe(4);
+    expect(annotated).not.toBe(baseResult);
+    expect(baseResult).not.toHaveProperty("telemetry_sources");
+  });
+
+  it("still validates against contract-public/result.schema.json, with any direct call count", async () => {
+    for (const directCallCount of [0, 4]) {
+      const annotated = annotateTelemetrySources(baseResult, directCallCount);
+      const errors = await validateResultObject(annotated);
+      expect(errors).toEqual([]);
+    }
+  });
 });

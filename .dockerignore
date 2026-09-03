@@ -6,7 +6,7 @@
 temp/
 results/
 tools/
-evals/holdout/
+evals/
 docs/BUILD_PLAN.md
 docs/PHASE1_READINESS.md
 node_modules
@@ -22,9 +22,9 @@ coverage
 # config directory under a local PI_CODING_AGENT_DIR -- auth.json (credentials on
 # /login), models-store.json, sessions/, pi-debug.log, trust.json -- must never
 # enter the build context; .gitignore is a separate mechanism Docker does not
-# read. What does ship is inert: Pi reads it only when PI_CODING_AGENT_DIR points
-# at it, and the harness never sets that variable, so the organizers' own Pi
-# configuration always wins inside the judged image.
+# read. The judged image now bakes ENV PI_CODING_AGENT_DIR=/challenge/.pi-agent
+# (organizer ruling, 2026-09-03: no organizer image for this track), so what
+# ships here is exactly what the judged run reads -- keep it inert credential-wise.
 .pi-agent/**
 !.pi-agent/models.json
 !.pi-agent/settings.json
@@ -32,3 +32,7 @@ coverage
 # Written by the runner. prepareOutput() unlinks a stale copy at run start, so
 # this is belt-and-braces; it still should not ride into the image.
 result.json
+
+# Reference-run copies for the submission (npm run submission). Not needed
+# inside the judged image itself.
+submission/

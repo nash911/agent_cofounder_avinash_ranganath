@@ -1,13 +1,20 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import {
+import { afterEach, describe, expect, it } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import thinkingGuard, {
   applyDecision,
+  contextSessionId,
   decideThinkingGuard,
   guardPayload,
   isFirstPartyHost,
+  payloadToolsCount,
   resolveThinkingLevel,
+  systemPromptSha256,
   wireEnableThinking,
   type ThinkingGuardContext,
 } from "../solution/extensions/thinking-guard.js";
@@ -199,6 +206,137 @@ describe("isFirstPartyHost", () => {
     expect(isFirstPartyHost("https://api.berget.ai/v1")).toBe(false);
     expect(isFirstPartyHost("https://localhost:8000/v1")).toBe(false);
     expect(isFirstPartyHost(undefined)).toBe(false);
+  });
+});
+
+describe("systemPromptSha256", () => {
+  it("hashes JSON.stringify(payload.messages[0])", () => {
+    const messages = [{ role: "system", content: "You are terse." }, { role: "user", content: "hi" }];
+    const expected = createHash("sha256").update(JSON.stringify(messages[0])).digest("hex");
+    expect(systemPromptSha256({ model: "m", messages })).toBe(expected);
+  });
+
+  it("changes when the first message changes, and is stable across a byte-identical prefix", () => {
+    const first = { role: "system", content: "Prompt A" };
+    const again = { role: "system", content: "Prompt A" };
+    const different = { role: "system", content: "Prompt B" };
+    expect(systemPromptSha256({ messages: [first, { role: "user", content: "1" }] })).toBe(
+      systemPromptSha256({ messages: [again, { role: "user", content: "2" }] }),
+    );
+    expect(systemPromptSha256({ messages: [first] })).not.toBe(systemPromptSha256({ messages: [different] }));
+  });
+
+  it("returns null when messages[0] is missing", () => {
+    expect(systemPromptSha256({ model: "m" })).toBeNull();
+    expect(systemPromptSha256({ model: "m", messages: [] })).toBeNull();
+    expect(systemPromptSha256({ model: "m", messages: undefined })).toBeNull();
+    expect(systemPromptSha256("not a payload")).toBeNull();
+    expect(systemPromptSha256(null)).toBeNull();
+  });
+});
+
+describe("payloadToolsCount", () => {
+  it("counts payload.tools when present", () => {
+    expect(payloadToolsCount({ tools: [{ name: "read" }, { name: "write" }] })).toBe(2);
+  });
+
+  it("is zero when tools is absent, not an array, or the payload is not an object", () => {
+    expect(payloadToolsCount({ model: "m" })).toBe(0);
+    expect(payloadToolsCount({ tools: "not-an-array" })).toBe(0);
+    expect(payloadToolsCount("not a payload")).toBe(0);
+    expect(payloadToolsCount(null)).toBe(0);
+  });
+});
+
+describe("contextSessionId", () => {
+  it("reads ctx.sessionManager.getSessionId when available", () => {
+    const context: ThinkingGuardContext = {
+      sessionManager: { getSessionId: () => "session-123" },
+    };
+    expect(contextSessionId(context)).toBe("session-123");
+  });
+
+  it("is null when sessionManager or getSessionId is absent, or throws", () => {
+    expect(contextSessionId({})).toBeNull();
+    expect(contextSessionId({ sessionManager: {} })).toBeNull();
+    expect(
+      contextSessionId({
+        sessionManager: {
+          getSessionId: () => {
+            throw new Error("no session");
+          },
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("payload log (contract C5)", () => {
+  const temporaryDirectories: string[] = [];
+
+  afterEach(async () => {
+    delete process.env.HARNESS_PAYLOAD_LOG;
+    await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })));
+  });
+
+  it("records ts, source, fired, reason, level, model, system_sha256, tools, session", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-cofounder-payload-log-"));
+    temporaryDirectories.push(directory);
+    const logPath = path.join(directory, "payload.jsonl");
+    process.env.HARNESS_PAYLOAD_LOG = logPath;
+
+    let handler: ((event: unknown, context: unknown) => unknown) | undefined;
+    const stubPi = {
+      on: (_event: string, fn: (event: unknown, context: unknown) => unknown) => {
+        handler = fn;
+      },
+    } as unknown as ExtensionAPI;
+    thinkingGuard(stubPi);
+    expect(handler).toBeDefined();
+
+    const messages = [{ role: "system", content: "System prompt" }, { role: "user", content: "hi" }];
+    const payload = { model: "zai-org/GLM-5.2", messages, tools: [{ name: "read" }, { name: "bash" }] };
+    const context = {
+      model: { id: "berget/zai-org/GLM-5.2", baseUrl: "https://api.berget.ai/v1", api: "openai-completions" },
+      thinkingLevel: "off",
+      sessionManager: { getSessionId: () => "session-abc" },
+    };
+
+    await handler?.({ type: "before_provider_request", payload }, context);
+
+    const record = JSON.parse((await readFile(logPath, "utf8")).trim()) as Record<string, unknown>;
+    expect(typeof record.ts).toBe("string");
+    expect(record.enable_thinking).toBe(false);
+    expect(record.source).toBe("guard");
+    expect(record.fired).toBe(true);
+    expect(record.reason).toBe("applied");
+    expect(record.level).toBe("off");
+    expect(record.model).toBe("berget/zai-org/GLM-5.2");
+    expect(record.system_sha256).toBe(createHash("sha256").update(JSON.stringify(messages[0])).digest("hex"));
+    expect(record.tools).toBe(2);
+    expect(record.session).toBe("session-abc");
+  });
+
+  it("records system_sha256 null and session null when the payload/context carry neither", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-cofounder-payload-log-"));
+    temporaryDirectories.push(directory);
+    const logPath = path.join(directory, "payload.jsonl");
+    process.env.HARNESS_PAYLOAD_LOG = logPath;
+
+    let handler: ((event: unknown, context: unknown) => unknown) | undefined;
+    const stubPi = {
+      on: (_event: string, fn: (event: unknown, context: unknown) => unknown) => {
+        handler = fn;
+      },
+    } as unknown as ExtensionAPI;
+    thinkingGuard(stubPi);
+
+    await handler?.({ type: "before_provider_request", payload: {} }, {});
+
+    const record = JSON.parse((await readFile(logPath, "utf8")).trim()) as Record<string, unknown>;
+    expect(record.system_sha256).toBeNull();
+    expect(record.tools).toBe(0);
+    expect(record.session).toBeNull();
   });
 });
 

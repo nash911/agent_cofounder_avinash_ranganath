@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 
 /**
@@ -57,6 +58,8 @@ export interface ThinkingGuardContext {
     | { readonly baseUrl?: string | undefined; readonly api?: string | undefined }
     | undefined;
   readonly thinkingLevel?: string | undefined;
+  /** Read-only session manager; only `getSessionId` is used, for the payload log. */
+  readonly sessionManager?: { readonly getSessionId?: () => string } | undefined;
 }
 
 /** True when the request body is an OpenAI chat-completions one, or unknown. */
@@ -166,10 +169,46 @@ export function applyDecision(
   return { ...payload, chat_template_kwargs: { enable_thinking: decision.enableThinking } };
 }
 
+/**
+ * `sha256(JSON.stringify(payload.messages[0]))`, or `null` when the payload is
+ * not an object, carries no `messages` array, or that array's first element is
+ * missing. Session files don't store the system prompt (Phase 1 readiness
+ * §3), so this hash — over the wire payload's first message, which is where
+ * Pi places the system prompt — is the byte-identity signal contract C5
+ * relies on: `harness/prefix.py` groups payload-log records by `tools` and
+ * warns when a group carries more than one distinct hash.
+ */
+export function systemPromptSha256(payload: unknown): string | null {
+  if (!isPlainObject(payload)) return null;
+  const messages = payload.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const first: unknown = messages[0];
+  if (first === undefined) return null;
+  return createHash("sha256").update(JSON.stringify(first)).digest("hex");
+}
+
+/** `payload.tools.length`, or `0` when the payload carries no tools array. */
+export function payloadToolsCount(payload: unknown): number {
+  if (!isPlainObject(payload)) return 0;
+  const tools = payload.tools;
+  return Array.isArray(tools) ? tools.length : 0;
+}
+
+/** The active session id, or `null` when the context exposes none. */
+export function contextSessionId(context: ThinkingGuardContext): string | null {
+  try {
+    return context.sessionManager?.getSessionId?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function appendPayloadLog(
   decision: ThinkingGuardDecision,
   modelId: string,
   wire: boolean | null,
+  payload: unknown,
+  context: ThinkingGuardContext,
 ): void {
   const logPath = process.env.HARNESS_PAYLOAD_LOG;
   if (!logPath) return;
@@ -182,6 +221,9 @@ function appendPayloadLog(
       reason: decision.reason,
       level: decision.level,
       model: modelId,
+      system_sha256: systemPromptSha256(payload),
+      tools: payloadToolsCount(payload),
+      session: contextSessionId(context),
     };
     appendFileSync(logPath, `${JSON.stringify(record)}\n`, "utf8");
   } catch {
@@ -197,13 +239,14 @@ export default function thinkingGuard(pi: ExtensionAPI): void {
       decision.fired && isPlainObject(event.payload)
         ? applyDecision(event.payload, decision)
         : undefined;
-    const wire = wireEnableThinking(replacement ?? event.payload);
+    const finalPayload = replacement ?? event.payload;
+    const wire = wireEnableThinking(finalPayload);
     console.error(
       `[thinking-guard] fired=${decision.fired} reason=${decision.reason} ` +
         `level=${decision.level} wire_enable_thinking=${String(wire)} model=${modelId} ` +
         `api=${context.model?.api ?? "unknown"}`,
     );
-    appendPayloadLog(decision, modelId, wire);
+    appendPayloadLog(decision, modelId, wire, finalPayload, context);
     return replacement;
   });
 }

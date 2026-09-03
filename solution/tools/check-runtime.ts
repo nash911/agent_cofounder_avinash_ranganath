@@ -40,7 +40,6 @@ interface CheckResult {
 interface InterpreterResolution {
   source: string;
   interpreter?: string;
-  archive?: string;
 }
 
 function isExecutable(candidate: string): boolean {
@@ -52,18 +51,15 @@ function isExecutable(candidate: string): boolean {
   }
 }
 
-function standaloneArchitecture(architecture: string): string {
-  if (architecture === "x64") return "x86_64";
-  if (architecture === "arm64") return "aarch64";
-  return architecture;
-}
-
 /**
  * Mirrors `resolveHarnessInterpreter` in src/run-challenge.ts. Deliberately
  * duplicated rather than imported so the preflight keeps working while the
- * runner seam is edited — KEEP THE TWO IN SYNC when the order changes.
+ * runner seam is edited — KEEP THE TWO IN SYNC when the order changes. The
+ * judged environment is our own Dockerfile and runtime (organizer ruling,
+ * 2026-09-03), so there is no vendored-CPython fallback to probe here any
+ * more: `python3` is always present in the image.
  */
-function resolveInterpreter(repositoryRoot: string, environment: NodeJS.ProcessEnv): InterpreterResolution {
+function resolveInterpreter(_repositoryRoot: string, environment: NodeJS.ProcessEnv): InterpreterResolution {
   try {
     const explicit = environment.HARNESS_PYTHON;
     if (explicit && isExecutable(explicit)) {
@@ -77,28 +73,6 @@ function resolveInterpreter(repositoryRoot: string, environment: NodeJS.ProcessE
       if (isExecutable(candidate)) {
         return { source: "PATH", interpreter: candidate };
       }
-    }
-
-    const extracted = path.join(
-      repositoryRoot,
-      "artifacts",
-      "python",
-      `${process.platform}-${process.arch}`,
-      "bin",
-      "python3",
-    );
-    if (isExecutable(extracted)) {
-      return { source: "artifacts/python", interpreter: extracted };
-    }
-
-    const archive = path.join(
-      repositoryRoot,
-      "vendor",
-      "python",
-      `cpython-${standaloneArchitecture(process.arch)}-unknown-linux-gnu-install_only.tar.gz`,
-    );
-    if (existsSync(archive)) {
-      return { source: "vendor/python", archive };
     }
 
     return { source: "unresolved" };
@@ -185,20 +159,38 @@ function checkPiVersion(): CheckResult {
   }
 }
 
+/**
+ * Mirrors the acceptance bar `resolveHarnessInterpreter` actually applies
+ * (`canRunHarnessModule` in src/run-challenge.ts): a candidate that reports a
+ * version but cannot `import harness` with the repository root on
+ * `PYTHONPATH` is one the real resolver rejects and falls back to `--agent
+ * pi` for, silently losing the whole harness/telemetry path with no
+ * preflight warning. `PYTHONPATH` is set explicitly (not just `cwd`) so this
+ * probe stays faithful even when the caller's environment has
+ * `PYTHONSAFEPATH` set, which suppresses Python's automatic cwd-prepend but
+ * not an explicit `PYTHONPATH` entry.
+ */
+function canImportHarness(interpreter: string): boolean {
+  const env = { ...process.env };
+  const existing = env.PYTHONPATH;
+  env.PYTHONPATH = existing ? [REPOSITORY_ROOT, existing].join(path.delimiter) : REPOSITORY_ROOT;
+  const probe = spawnSync(interpreter, ["-c", "import harness"], {
+    cwd: REPOSITORY_ROOT,
+    env,
+    encoding: "utf8",
+    timeout: LIST_MODELS_TIMEOUT_MS,
+    shell: false,
+  });
+  return probe.error === undefined && probe.status === 0;
+}
+
 function checkPython(resolution: InterpreterResolution): CheckResult {
-  if (resolution.archive) {
-    return {
-      status: "OK",
-      name: "python",
-      detail: `vendored archive ${path.relative(REPOSITORY_ROOT, resolution.archive)} (extracted on first use)`,
-    };
-  }
   const interpreter = resolution.interpreter;
   if (!interpreter) {
     return {
       status: "FAIL",
       name: "python",
-      detail: "no interpreter from HARNESS_PYTHON, PATH, artifacts/python or vendor/python",
+      detail: "no interpreter from HARNESS_PYTHON or PATH",
     };
   }
   const probe = spawnSync(interpreter, ["-c", "import sys;print(sys.version)"], {
@@ -214,7 +206,56 @@ function checkPython(resolution: InterpreterResolution): CheckResult {
     };
   }
   const reported = probe.stdout.trim().replace(/\s+/g, " ");
+  if (!canImportHarness(interpreter)) {
+    return {
+      status: "FAIL",
+      name: "python",
+      detail: `${interpreter} (${resolution.source}) reports a version but cannot 'import harness' with PYTHONPATH=${REPOSITORY_ROOT} -- resolveHarnessInterpreter would reject it and fall back to --agent pi`,
+    };
+  }
   return { status: "OK", name: "python", detail: `${interpreter} (${resolution.source}) ${reported}` };
+}
+
+function findPython310OnPath(): string | undefined {
+  const executable = process.platform === "win32" ? "python3.10.exe" : "python3.10";
+  for (const entry of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!entry) continue;
+    const candidate = path.join(entry, executable);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * `harness/` must run unmodified on Python 3.10 (dev default) as well as the
+ * 3.12 baked into the judged image (BUILD_PLAN §3). `python3.10` itself is
+ * dev-machine-only tooling — it is absent inside the image on purpose, so its
+ * absence here is a SKIP, not a FAIL.
+ */
+function checkPython310Floor(): CheckResult {
+  const interpreter = findPython310OnPath();
+  if (!interpreter) {
+    return {
+      status: "SKIP",
+      name: "python3.10 floor",
+      detail: "python3.10 not found on PATH (expected inside the judged image)",
+    };
+  }
+  const probe = spawnSync(interpreter, ["-m", "compileall", "-q", "harness"], {
+    cwd: REPOSITORY_ROOT,
+    encoding: "utf8",
+    timeout: LIST_MODELS_TIMEOUT_MS,
+    shell: false,
+  });
+  const output = `${probe.stdout ?? ""}${probe.stderr ?? ""}`.trim();
+  if (probe.error || probe.status !== 0 || output !== "") {
+    return {
+      status: "FAIL",
+      name: "python3.10 floor",
+      detail: `${interpreter} -m compileall -q harness: ${output || String(probe.error) || `exit ${String(probe.status)}`}`,
+    };
+  }
+  return { status: "OK", name: "python3.10 floor", detail: `${interpreter} -m compileall -q harness (silent)` };
 }
 
 function checkWritableDirectory(relative: string): CheckResult {
@@ -291,6 +332,7 @@ function main(): void {
     checkNode(),
     checkPiVersion(),
     checkPython(resolution),
+    checkPython310Floor(),
     checkWritableDirectory("artifacts"),
     checkWritableDirectory("output"),
     checkChallengeEnvironment(),

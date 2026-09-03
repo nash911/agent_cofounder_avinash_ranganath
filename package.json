@@ -9,7 +9,10 @@
   },
   "scripts": {
     "challenge": "node --import tsx src/run-challenge.ts",
+    "serve": "npm --prefix output/app run dev",
     "validate:result": "node --import tsx src/validate-result.ts",
+    "verify:telemetry": "node --import tsx tools/verify-telemetry.ts",
+    "submission": "node --import tsx tools/submission.ts",
     "typecheck": "tsc --noEmit",
     "check:runtime": "node --import tsx solution/tools/check-runtime.ts",
     "test": "vitest run",

@@ -45,40 +45,112 @@ The default thinking level is `off` to avoid multiplying output-token cost in th
 
 The strict Node engine is intentional. `npm ci` fails on Node 23+ (including Node 26); use `.nvmrc` or the provided container rather than regenerating the lockfile with a newer runtime.
 
-The Docker build runs the full check suite, including short-lived Vite servers over the builder's loopback interface. The image declares port 3000 for organizer-controlled browser evaluation; publishing that port still requires an explicit container port mapping or shared container network.
+The Docker build does **not** run the check suite (organizer ruling, 2026-09-03: the judged image build is not gated on it); `npm run check` still runs in CI. The image declares port 3000 for organizer-controlled browser evaluation; publishing that port still requires an explicit container port mapping or shared container network.
 
-## Local provider configuration
+## Build, run, serve (the documented commands)
 
-Development against Berget uses a repository-local Pi configuration directory,
-`.pi-agent/`, holding `models.json` (the `berget` provider and its three models)
-and `settings.json` (`quietStartup`, `defaultThinkingLevel: off`). No credential
-is committed: `models.json` references `$BERGET_API_KEY`, which Pi interpolates
-from the environment.
+**Organizer ruling (2026-09-03):** the judged environment is *our* Dockerfile
+and runtime, built and run for `linux/arm64` (Apple Silicon) — there is no
+organizer-supplied image. For the BYO track, the organizers run the command we
+document; that command is `scripts/judge.sh`. Build-time network access is
+open; runtime network access is closed except the model gateway.
 
-Pi only reads that directory when `PI_CODING_AGENT_DIR` points at it, and the
-variable must be an absolute path. Set it locally, never in the judged
-environment:
+### `scripts/judge.sh` (the documented command)
 
 ```bash
-export PI_CODING_AGENT_DIR="$PWD/.pi-agent"
-export BERGET_API_KEY="…"
-node_modules/.bin/pi --offline --no-extensions --list-models
+scripts/judge.sh [--platform linux/arm64|linux/amd64] [--image NAME] [--serve] [--idea-file PATH]
 ```
 
-Pi's default configuration directory is `~/.pi/agent`, so the presence of
-`.pi-agent/` in the image is inert; the organizers' own Pi configuration and
-their `CHALLENGE_PROVIDER` / `CHALLENGE_MODEL` values continue to win. Harness
-code never sets `PI_CODING_AGENT_DIR`.
+It builds the image with `docker buildx`, creates a container with `output/`
+and `artifacts/` bind-mounted to the host, runs the challenge, copies
+`result.json` back to the repository root, prints its `status` /
+`model_calls` / `points` fields, and removes the container. Pass `--serve` to
+follow the run by serving `output/app` on `http://localhost:3000`. Pass
+`--idea-file` to bind-mount a host idea file into the container read-only in
+place of the repository's default. Run `scripts/judge.sh --help` for the full
+flag reference, including the host-uid-1000 assumption behind the bind mounts
+and the `chown` fallback if your host user differs.
 
-`solution/extensions/thinking-guard.ts` is loaded by explicit `--extension` path
-(explicit paths survive `--no-extensions`). On `before_provider_request` it adds
-`chat_template_kwargs: {"enable_thinking": <level !== "off">}` when the payload
-carries no thinking field of its own and the endpoint is not a known first-party
-host, so an OpenAI-compatible vLLM deployment registered under an unexpected
-provider name still receives an explicit "thinking off". It takes the level from
-Pi's live session state, falling back to `CHALLENGE_THINKING` and then to `off`.
-Set `HARNESS_THINKING_GUARD=0` to disable it, and `HARNESS_PAYLOAD_LOG=<path>`
-to append one JSON line per decision.
+### The equivalent manual Docker commands
+
+Omit `--env-file .env` below if you have not created a local `.env` (see `.env.example`).
+
+```bash
+docker buildx build --platform linux/arm64 --load -t agentcofounder:arm64 .
+mkdir -p output artifacts
+docker create --platform linux/arm64 --name agentcofounder-run \
+  --env-file .env \
+  -e CHALLENGE_PROVIDER -e CHALLENGE_MODEL -e CHALLENGE_THINKING -e CHALLENGE_TIMEOUT_MS \
+  -e BERGET_API_KEY -e CHALLENGE_API_KEY -e OPENAI_API_KEY \
+  -v "$PWD/output:/challenge/output" \
+  -v "$PWD/artifacts:/challenge/artifacts" \
+  agentcofounder:arm64
+docker start -a agentcofounder-run          # exit code is informational; result.json is authoritative
+docker cp agentcofounder-run:/challenge/result.json ./result.json
+docker rm agentcofounder-run
+```
+
+The `ENTRYPOINT` (`scripts/entrypoint.sh`) resolves the model-gateway
+credential (first non-empty of `BERGET_API_KEY`, `CHALLENGE_API_KEY`,
+`OPENAI_API_KEY`), logs only which name it used, and execs
+`npm run challenge -- "$@"`.
+
+### Serve the generated app
+
+```bash
+npm run serve       # npm --prefix output/app run dev, bound to 0.0.0.0:3000
+```
+
+or, without a local Node install, `docker run --rm -p 3000:3000 -v "$PWD/output:/challenge/output" --entrypoint npm agentcofounder:arm64 run serve`.
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `CHALLENGE_PROVIDER` | Provider name for the run (organizer-controlled during judging). |
+| `CHALLENGE_MODEL` | Model id for the run (organizer-controlled during judging; default `zai-org/GLM-5.2`). |
+| `CHALLENGE_THINKING` | Pi thinking level (default `off`, to avoid multiplying output-token cost). |
+| `CHALLENGE_TIMEOUT_MS` | Wall-clock budget for the whole challenge run (default `900000`). |
+| `BERGET_API_KEY` | Canonical model-gateway credential. |
+| `CHALLENGE_API_KEY` | Alias for `BERGET_API_KEY` (first non-empty of the three wins). |
+| `OPENAI_API_KEY` | Alias for `BERGET_API_KEY` (lowest-priority; first non-empty of the three wins). |
+| `HARNESS_GATEWAY_URL` | Base URL for direct-gateway reasoning calls (default `https://api.berget.ai/v1`). |
+| `HARNESS_DIRECT` | Set `0` to disable the direct-gateway Analyst seed call; it never blocks the Pi session on failure either way (default `1`). |
+| `HARNESS_PYTHON` | Explicit Python interpreter for the `--agent python` orchestrator; falls back to `python3` on `PATH`, then `runPi` (default unset). |
+| `HARNESS_THINKING_GUARD` | Set `0` to disable `solution/extensions/thinking-guard.ts`, which adds an explicit `enable_thinking:false` to the outgoing payload when nothing else on the wire already disables thinking (default `1`). |
+
+Never commit credentials. `.env.example` documents every variable name above;
+`scripts/entrypoint.sh` and `scripts/judge.sh` read `.env` only through Docker's
+`--env-file`, never by loading it into harness code.
+
+### Telemetry contract
+
+Every model call — Pi's own and every direct-gateway call, retries and
+orchestration-level calls included — is counted. `events.jsonl` carries every
+Pi event plus one synthetic `message_end` per direct-gateway attempt, tagged
+`"source":"direct-gateway"`. For the BYO track the per-invocation files are the
+audit artifact, not `events.jsonl`: Pi session JSONL under
+`artifacts/runs/<id>/sessions/<n>-<role>/`, and every direct-gateway attempt's
+verbatim request/response logged to `artifacts/runs/<id>/harness/direct-calls.jsonl`.
+`result.json` keeps `telemetry_source: "pi-json-event-stream"` (the schema
+const) and, whenever `direct-calls.jsonl` exists, adds
+`telemetry_sources: ["pi-json-event-stream","direct-gateway"]` and
+`direct_call_count`.
+
+```bash
+npm run verify:telemetry     # re-derives call totals from the per-invocation files
+                              # and diffs them against result.json's call_log; exits
+                              # non-zero on the first mismatch
+npm run submission           # copies a reference run's artifacts/runs/<id>/ and both
+                              # result.json files into submission/ for committing
+```
+
+### A note on timings
+
+Timings recorded in this repository (`docs/measurements.md`) were measured on
+`linux/amd64`; the image itself targets and is judged on `linux/arm64`. Build
+and run linux/arm64 under `docker buildx` with QEMU for a functional check —
+expect it to run several times slower than native arm64 hardware.
 
 ## Run the public challenge
 

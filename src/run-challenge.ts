@@ -18,7 +18,7 @@ import type { RunResult } from "./types.js";
 import { validateResultObject } from "./validate-result.js";
 import { portHasListener, unavailableAppVerification, verifyGeneratedApp } from "./verify-app.js";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants as fileConstants, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { accessSync, constants as fileConstants, existsSync, statSync } from "node:fs";
 
 export type AgentKind = "python" | "pi";
 
@@ -346,6 +346,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  const directCallsPath = path.join(artifactDirectory, "harness", "direct-calls.jsonl");
+  if (existsSync(directCallsPath)) {
+    const directCallCount = countNonBlankLines(await readFile(directCallsPath, "utf8"));
+    const annotated: RunResult & Record<string, unknown> = annotateTelemetrySources(result, directCallCount);
+    resultPaths = await writeResult(outputDirectory, annotated, [rootResultPath]);
+    const annotationErrors = await validateResultObject(annotated);
+    if (annotationErrors.length > 0) {
+      for (const error of annotationErrors) console.error(`- ${error}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   console.log(`Result written to ${resultPaths.join(" and ")}`);
   console.log(`Audit artifacts written to ${artifactDirectory}`);
   for (const missingResultPath of missingResultPaths) {
@@ -364,58 +377,51 @@ async function main(): Promise<void> {
 /** Head start the Python harness must keep over the runner's own SIGTERM timer. */
 export const HARNESS_SHUTDOWN_MARGIN_MS = 30_000;
 
+/** Number of non-blank JSONL lines, i.e. attempts logged by `harness/gateway.py`. */
+export function countNonBlankLines(content: string): number {
+  return content.split(/\r?\n/u).filter((line) => line.trim() !== "").length;
+}
+
+/**
+ * Contract C8: when the harness made direct gateway calls (organizer ruling,
+ * 2026-09-03 — orchestration-level model calls go direct and every attempt is
+ * counted), `<artifact-run>/harness/direct-calls.jsonl` is the per-attempt
+ * audit artifact for those calls. `result.json` keeps the schema's
+ * `telemetry_source` const untouched and gains two additional fields so a
+ * reader can tell the run mixed Pi's own JSON event stream with direct-gateway
+ * traffic, and reconcile the two against `npm run verify:telemetry`. Pure so
+ * it is testable without a filesystem.
+ */
+export function annotateTelemetrySources(
+  result: RunResult,
+  directCallCount: number,
+): RunResult & Record<string, unknown> {
+  return {
+    ...result,
+    telemetry_sources: ["pi-json-event-stream", "direct-gateway"],
+    direct_call_count: directCallCount,
+  };
+}
+
 function harnessInterpreterNames(): string[] {
   return process.platform === "win32" ? ["python3.exe", "python.exe"] : ["python3"];
 }
 
-function extractedHarnessInterpreter(repositoryRoot: string): string {
-  return path.join(
-    repositoryRoot,
-    "artifacts",
-    "python",
-    `${process.platform}-${process.arch}`,
-    "bin",
-    process.platform === "win32" ? "python.exe" : "python3",
-  );
-}
-
-/** python-build-standalone names its archives with the GNU architecture, not Node's. */
-function standaloneArchitecture(architecture: string): string {
-  if (architecture === "x64") return "x86_64";
-  if (architecture === "arm64") return "aarch64";
-  return architecture;
-}
-
-function vendoredHarnessArchive(repositoryRoot: string): string {
-  return path.join(
-    repositoryRoot,
-    "vendor",
-    "python",
-    `cpython-${standaloneArchitecture(process.arch)}-unknown-linux-gnu-install_only.tar.gz`,
-  );
-}
-
-/** Human-readable list of the locations `resolveHarnessInterpreter` probes, in order. */
+/**
+ * Human-readable list of the locations `resolveHarnessInterpreter` probes, in
+ * order. `repositoryRoot` is accepted for call-site symmetry with the resolver
+ * it summarizes even though nothing here is repository-relative any more.
+ */
 export function harnessInterpreterProbeSummary(repositoryRoot: string, env: NodeJS.ProcessEnv): string {
   return [
     `HARNESS_PYTHON=${env.HARNESS_PYTHON ?? "<unset>"}`,
-    `${harnessInterpreterNames().join("|")} on PATH`,
-    extractedHarnessInterpreter(repositoryRoot),
-    vendoredHarnessArchive(repositoryRoot),
+    `${harnessInterpreterNames().join("|")} on PATH (repository root ${repositoryRoot})`,
   ].join(", ");
 }
 
 function isExecutableFile(candidate: string): boolean {
   try {
     accessSync(candidate, fileConstants.X_OK);
-    return statSync(candidate).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function isRegularFile(candidate: string): boolean {
-  try {
     return statSync(candidate).isFile();
   } catch {
     return false;
@@ -454,11 +460,13 @@ function canRunHarnessModule(
 
 /**
  * Resolves the interpreter that runs `-m harness`: `HARNESS_PYTHON`, then
- * `python3` on `PATH`, then a previously extracted standalone build, then a
- * one-shot extraction of the vendored `.tar.gz` (the judged image has neither
- * xz nor zstd). Every candidate must survive an `import harness` probe. Returns
- * `undefined` instead of throwing so the caller can fall back to `runPi`; it
- * must therefore run before any `wx` stream is opened.
+ * `python3` on `PATH`. The judged environment is our own Dockerfile and
+ * runtime (organizer ruling, 2026-09-03) with Python baked into the image, so
+ * the vendored-CPython fallback that used to sit here is dead weight; the
+ * image always has a `python3`. Every candidate must still survive an `import
+ * harness` probe. Returns `undefined` instead of throwing so the caller can
+ * fall back to `runPi`; it must therefore run before any `wx` stream is
+ * opened.
  */
 export function resolveHarnessInterpreter(
   repositoryRoot: string,
@@ -478,25 +486,7 @@ export function resolveHarnessInterpreter(
       }
     }
 
-    const extracted = extractedHarnessInterpreter(repositoryRoot);
-    if (isExecutable(extracted)) return extracted;
-
-    const archive = vendoredHarnessArchive(repositoryRoot);
-    if (!isRegularFile(archive)) return undefined;
-
-    const installRoot = path.dirname(path.dirname(extracted));
-    const staging = `${installRoot}.staging-${process.pid}`;
-    rmSync(staging, { force: true, recursive: true });
-    mkdirSync(staging, { recursive: true });
-    const extraction = spawnSync("tar", ["-xzf", archive, "--strip-components=1", "-C", staging], {
-      shell: false,
-    });
-    if (extraction.status !== 0) {
-      rmSync(staging, { force: true, recursive: true });
-      return undefined;
-    }
-    renameSync(staging, installRoot);
-    return isExecutable(extracted) ? extracted : undefined;
+    return undefined;
   } catch {
     return undefined;
   }

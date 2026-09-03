@@ -39,8 +39,16 @@ def harness_environment(extra: Optional[Dict[str, str]] = None) -> Dict[str, str
     env.pop("HARNESS_PAYLOAD_LOG", None)
     for name in ("FAKE_PI_HANG", "FAKE_PI_SLOW", "FAKE_PI_ERROR", "FAKE_PI_ERROR_ONCE",
                  "FAKE_PI_LINES", "FAKE_PI_GARBAGE", "FAKE_PI_WRITE_REPORT", "FAKE_PI_COMPACT",
+                 "FAKE_PI_GREEN_TESTS", "FAKE_PI_OUTPUT_TOKENS",
                  "HARNESS_PI_AUTO_RETRY", "HARNESS_RESUME_ATTEMPTS",
-                 "HARNESS_RESUME_BACKOFF_S", "HARNESS_RESUME_MIN_BUDGET_S"):
+                 "HARNESS_RESUME_BACKOFF_S", "HARNESS_RESUME_MIN_BUDGET_S",
+                 "HARNESS_VITEST_BIN", "HARNESS_DIRECT", "HARNESS_GATEWAY_URL",
+                 # Never let a developer's real credentials reach a test process: a
+                 # test must never be able to make a real model call (hard rule),
+                 # regardless of whether harness/credentials.py + gateway.py exist
+                 # yet in this checkout.
+                 "BERGET_API_KEY", "CHALLENGE_API_KEY", "OPENAI_API_KEY",
+                 "CHALLENGE_MODEL", "CHALLENGE_PROVIDER"):
         env.pop(name, None)
     if extra:
         env.update(extra)

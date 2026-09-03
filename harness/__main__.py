@@ -24,6 +24,7 @@ the integration dry run only; nothing in a judged run should set it.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -31,18 +32,53 @@ import signal
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .budget import BudgetController
 from .log import close_file_sink, error as log_error, log, set_file_sink, warn
 from .pirpc import PiRpc, PiRpcError, PiRpcInterrupted, base_args, pi_env
+from . import prefix
+from . import report as report_mod
+
+#: The direct-gateway client (analyst, C4) is owned by a different part of this
+#: build; its three modules may not exist yet while this file is being worked
+#: on. Imported lazily, once, so a missing module degrades to "direct client
+#: unavailable" instead of an import-time crash of the whole harness.
+try:
+    from . import credentials as _credentials  # type: ignore[attr-defined]
+    from . import gateway as _gateway  # type: ignore[attr-defined]
+    from . import analyst as _analyst  # type: ignore[attr-defined]
+
+    DIRECT_CLIENT_AVAILABLE = True
+    _DIRECT_IMPORT_ERROR: Optional[str] = None
+except ImportError as _direct_import_exc:  # pragma: no cover - exercised before those land
+    _credentials = None  # type: ignore[assignment]
+    _gateway = None  # type: ignore[assignment]
+    _analyst = None  # type: ignore[assignment]
+    DIRECT_CLIENT_AVAILABLE = False
+    _DIRECT_IMPORT_ERROR = str(_direct_import_exc)
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
 EXIT_CONFIG = 2
 
 #: Reserved out of ``--timeout-ms`` for abort + shutdown, so the harness is gone
-#: well before the runner's own timer fires.
-SHUTDOWN_RESERVE_S = 20.0
+#: well before the runner's own timer fires. Bumped from 20.0 to 30.0 (ratified
+#: deviation, PHASE1_READINESS.md) to fit the harness-authored report's capped
+#: 15s shutdown observation inside the same margin as ``pirpc.close()``'s own
+#: 15s + 5s worst case.
+SHUTDOWN_RESERVE_S = 30.0
+
+#: Predicted output tokens for the Builder mission and each resume prompt
+#: (BUILD_PLAN.md rev 6 §1, C6). Real judged runs (900s budget) always satisfy
+#: ``BudgetController.can_start`` against these; the refusal path exists for
+#: correctness, not because it is expected to fire.
+BUILDER_PREDICTED_OUTPUT_TOKENS = 12000
+RESUME_PREDICTED_OUTPUT_TOKENS = 3000
+
+DEFAULT_GATEWAY_URL = "https://api.berget.ai/v1"
+DEFAULT_DIRECT_MODEL = "zai-org/GLM-5.2"
+DEFAULT_DIRECT_PROVIDER = "berget"
 
 #: Grace for the ``abort`` acknowledgement (``agent_settled`` or the response).
 ABORT_GRACE_S = 5.0
@@ -232,6 +268,150 @@ def child_environment(harness_directory: pathlib.Path, extensions: List[pathlib.
     return pi_env(extra)
 
 
+def payload_log_path(harness_directory: pathlib.Path) -> pathlib.Path:
+    """Where the thinking guard's payload log actually lands (C5).
+
+    Mirrors :func:`child_environment`'s own default so the prefix check reads
+    the same file the guard was told to write, whether the runner pointed
+    ``HARNESS_PAYLOAD_LOG`` somewhere else or not.
+    """
+    override = os.environ.get("HARNESS_PAYLOAD_LOG")
+    return pathlib.Path(override) if override else harness_directory / "payload.jsonl"
+
+
+# -- direct-gateway client (credentials, budget, analyst) -------------------
+#
+# ``gateway.GatewayClient`` already defaults its own cost table from
+# ``<repo>/.pi-agent/models.json`` when ``cost_table`` is omitted, so this
+# module does not load or pass one itself -- doing so would just be a second,
+# divergence-prone copy of the same lookup.
+
+
+def resolve_credentials() -> Tuple[Optional[str], Optional[str]]:
+    """``(api_key, name_used)``, or ``(None, None)`` when unavailable.
+
+    Never raises: a broken ``credentials`` module must not take the whole
+    harness down over a feature (the analyst) that is allowed to fail open.
+    """
+    if _credentials is None:
+        return None, None
+    try:
+        return _credentials.resolve_api_key()
+    except Exception as exc:  # noqa: BLE001 - credential resolution must not crash the harness
+        warn("credentials.resolve_api_key failed: {0}".format(exc))
+        return None, None
+
+
+def run_analyst(
+    harness_directory: pathlib.Path,
+    idea: str,
+    api_key: str,
+    args: argparse.Namespace,
+    deadline: float,
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[Dict[str, Any]]:
+    """Run the Analyst (C4) if the gateway is available; ``None`` on any failure.
+
+    Model/provider follow the same precedence as the rest of the harness:
+    the CLI flag, then the matching ``CHALLENGE_*`` env var, then the
+    contract default. Any failure here is logged and swallowed -- the Pi
+    session must proceed without a spec rather than block on it.
+
+    ``deadline`` is a small, bounded slice of the harness's own wall-clock
+    budget (see ``run()``), never the full run deadline -- a hung or
+    error-looping gateway must not be able to eat the time the Builder
+    mission needs. ``stop_event`` lets an in-flight retry backoff notice a
+    shutdown signal instead of sleeping it out.
+    """
+    try:
+        base_url = os.environ.get("HARNESS_GATEWAY_URL", DEFAULT_GATEWAY_URL)
+        model = args.model or os.environ.get("CHALLENGE_MODEL") or DEFAULT_DIRECT_MODEL
+        provider = args.provider or os.environ.get("CHALLENGE_PROVIDER") or DEFAULT_DIRECT_PROVIDER
+        client = _gateway.GatewayClient(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            harness_dir=harness_directory,
+            stop_event=stop_event,
+        )
+        return _analyst.run_analyst(client, idea, harness_directory, deadline=deadline)
+    except Exception as exc:  # noqa: BLE001 - the analyst is a seed feature, never a blocker
+        warn("analyst failed ({0}); the Pi session proceeds without a spec".format(exc))
+        return None
+
+
+def budget_gate_active() -> bool:
+    """Whether :class:`BudgetController`'s wall-clock predictions should gate.
+
+    ``HARNESS_PI_BIN`` (documented in ``pirpc.py`` as fake-Pi-tests/dry-run
+    only, and never set in a judged run) is also the one reliable signal that
+    there is no real model on the other end to predict a generation speed
+    for: every harness test drives the fake Pi, which answers near-instantly
+    regardless of predicted output size, so gating on a 30 tok/s assumption
+    against it would refuse missions the fixture never intended to be slow.
+    A judged run never sets this variable, so the gate is always live there.
+    """
+    return not os.environ.get("HARNESS_PI_BIN")
+
+
+def budget_gate_reason(
+    controller: BudgetController, predicted_output_tokens: int, accept_partial: bool = False
+) -> Optional[str]:
+    """``None`` when the mission may start, else the refusal reason.
+
+    A thin, directly-testable wrapper around ``controller.can_start`` so
+    ``test_main_wiring.py`` can exercise the refusal branch without spawning
+    a subprocess or fabricating an impossible real-time budget.
+    """
+    ok, reason = controller.can_start(predicted_output_tokens, accept_partial=accept_partial)
+    return None if ok else reason
+
+
+class _UsageObserver:
+    """Feeds every assistant ``message_end`` into the budget controller.
+
+    Output tokens plus the wall time elapsed since the *previous*
+    ``message_end`` this observer saw -- across the whole harness process, not
+    per prompt -- is what keeps ``BudgetController.tokens_per_s`` live.
+    """
+
+    def __init__(self, controller: BudgetController) -> None:
+        self._controller = controller
+        self._last_ts = time.monotonic()
+
+    def __call__(self, event: Dict[str, Any]) -> None:
+        if not isinstance(event, dict) or event.get("type") != "message_end":
+            return
+        message = event.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            return
+        usage = message.get("usage")
+        output = 0
+        if isinstance(usage, dict):
+            try:
+                output = int(usage.get("output") or 0)
+            except (TypeError, ValueError):
+                output = 0
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._last_ts)
+        self._last_ts = now
+        self._controller.observe_usage(output, elapsed)
+
+
+def _dispatch_event(callbacks: List[Callable[[Dict[str, Any]], None]]) -> Callable[[Dict[str, Any]], None]:
+    """Combine several ``on_event`` observers into the one :meth:`PiRpc.prompt` takes."""
+
+    def _handler(event: Dict[str, Any]) -> None:
+        for callback in callbacks:
+            try:
+                callback(event)
+            except Exception as exc:  # noqa: BLE001 - one observer's bug must not sink another's
+                warn("on_event observer failed: {0}".format(exc))
+
+    return _handler
+
+
 def _validate(args: argparse.Namespace) -> Dict[str, Any]:
     if args.timeout_ms < 1000:
         raise ConfigError("--timeout-ms must be an integer of at least 1000")
@@ -302,6 +482,39 @@ def run(args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             pass
 
+    # -- credentials, budget controller, analyst (C4/C6) --------------------
+    api_key, key_name = resolve_credentials()
+    log("credentials", "using {0}".format(key_name) if api_key else "none found")
+
+    controller = BudgetController(deadline_monotonic=deadline)
+    gate_active = budget_gate_active()
+
+    spec: Optional[Dict[str, Any]] = None
+    direct_disabled = os.environ.get("HARNESS_DIRECT", "").strip() == "0"
+    if direct_disabled:
+        log("harness", "direct client disabled (HARNESS_DIRECT=0)")
+    elif not DIRECT_CLIENT_AVAILABLE:
+        log("harness", "direct client unavailable ({0})".format(_DIRECT_IMPORT_ERROR))
+    elif not api_key:
+        log("harness", "analyst · skipped, no API key available")
+    elif stop_event.is_set():
+        log("harness", "analyst · skipped, shutting down")
+    else:
+        # A small, fixed slice of the run's own budget -- never more than
+        # ~30s, and less when the Builder mission's own predicted finish
+        # already leaves little enough margin that every second counts. This
+        # is what keeps a hung/erroring gateway from eating the time the
+        # Builder mission needs (it is attempted next, regardless of whether
+        # the analyst produced a spec).
+        analyst_reserve_s = controller.predict_seconds(BUILDER_PREDICTED_OUTPUT_TOKENS) + controller.finish_margin_s
+        analyst_deadline = min(
+            time.monotonic() + 30.0, deadline - SHUTDOWN_RESERVE_S - analyst_reserve_s
+        )
+        spec = run_analyst(
+            harness_directory, config["idea"], api_key, args, deadline=analyst_deadline, stop_event=stop_event
+        )
+        log("harness", "analyst · {0}".format("spec produced" if spec else "no spec (continuing without one)"))
+
     skill = repository_root / "solution" / "skills" / "mvp-builder"
     if not skill.is_dir():
         warn("skill directory not found at {0}; running without it".format(skill))
@@ -327,6 +540,26 @@ def run(args: argparse.Namespace) -> int:
             SESSION_LABEL, thinking, args.timeout_ms / 1000.0, app_directory
         ),
     )
+
+    if gate_active:
+        refusal = budget_gate_reason(controller, BUILDER_PREDICTED_OUTPUT_TOKENS)
+        if refusal is not None:
+            log_error("budget · cannot start Builder mission: {0}".format(refusal))
+            for signum, handler in previous_handlers.items():
+                try:
+                    signal.signal(signum, handler)
+                except (OSError, ValueError):
+                    pass
+            return EXIT_FAILURE
+
+    report_watcher = report_mod.ReportWatcher(
+        app_dir=app_directory,
+        harness_dir=harness_directory,
+        idea_text=config["idea"],
+        spec=spec,
+    )
+    usage_observer = _UsageObserver(controller)
+    on_event = _dispatch_event([usage_observer, report_watcher.on_event])
 
     client = PiRpc(
         pi_bin=config["pi_binary"],
@@ -360,14 +593,25 @@ def run(args: argparse.Namespace) -> int:
         if not stop_event.is_set():
             budget = max(1.0, deadline - time.monotonic() - SHUTDOWN_RESERVE_S)
             prompt_text = "## Product idea\n\n" + config["idea"] + "\n"
+            mission = controller.begin_mission("builder", BUILDER_PREDICTED_OUTPUT_TOKENS)
             try:
-                result = client.prompt(prompt_text, timeout=budget)
+                result = client.prompt(prompt_text, timeout=budget, on_event=on_event)
             except PiRpcInterrupted:
                 result["interrupted"] = True
             except PiRpcError as exc:
                 result["error"] = str(exc)
+            finally:
+                call_usage = result.get("usage")
+                controller.end_mission(
+                    mission,
+                    getattr(call_usage, "output", 0) or 0,
+                    result.get("wall_s", 0.0) or 0.0,
+                )
             if not result.get("interrupted"):
-                result = _resume_after_transient_errors(client, result, deadline, stop_event)
+                result = _resume_after_transient_errors(
+                    client, result, deadline, stop_event,
+                    controller=controller, gate_active=gate_active, on_event=on_event,
+                )
         else:
             result["interrupted"] = True
     finally:
@@ -401,6 +645,48 @@ def run(args: argparse.Namespace) -> int:
         ),
     )
 
+    # -- harness-authored report (C7) ----------------------------------
+    # A signalled shutdown races the runner's own 5s SIGTERM->SIGKILL grace
+    # (src/process-tree.ts); spawning vitest here is exactly the kind of
+    # unbounded-relative-to-that-grace call the shutdown path must not make,
+    # so a real OS signal skips this step outright rather than risking it.
+    report_path = app_directory / "report.partial.json"
+    needs_final_report = bool(result.get("interrupted")) or bool(result.get("timed_out")) or not report_path.is_file()
+    if signalled:
+        log("report", "final observe skipped (signal received); shutdown must stay fast")
+    elif needs_final_report:
+        observation = report_watcher.final_observe()
+        log(
+            "report",
+            "final observe · green={0} total={1} passed={2} failed={3}".format(
+                observation.get("green"), observation.get("total"),
+                observation.get("passed"), observation.get("failed"),
+            ),
+        )
+    else:
+        report_watcher.join(2.0)
+
+    # -- prompt-prefix byte-identity check (C5) --------------------------
+    prefix.check(payload_log_path(harness_directory))
+
+    # -- budget snapshot (C6) --------------------------------------------
+    snapshot = controller.snapshot()
+    predicted_total_s = sum(p.get("predicted_s", 0.0) for p in snapshot["predictions"])
+    actual_total_s = sum(p.get("actual_s", 0.0) for p in snapshot["predictions"])
+    log(
+        "budget",
+        "elapsed={0:.0f}s output={1} peak={2} tok/s={3:.1f} predicted={4:.0f}s actual={5:.0f}s".format(
+            snapshot["elapsed_s"], snapshot["cumulative_output"], snapshot["peak_output"],
+            snapshot["tokens_per_s"], predicted_total_s, actual_total_s,
+        ),
+    )
+    try:
+        (harness_directory / "budget.json").write_text(
+            json.dumps(snapshot, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        warn("could not write budget.json: {0}".format(exc))
+
     success = bool(result.get("success"))
     log("harness", "exit {0} ({1})".format(EXIT_SUCCESS if success else EXIT_FAILURE, "success" if success else "no usable assistant turn"))
     return EXIT_SUCCESS if success else EXIT_FAILURE
@@ -411,6 +697,10 @@ def _resume_after_transient_errors(
     result: Dict[str, Any],
     deadline: float,
     stop_event: threading.Event,
+    *,
+    controller: Optional[BudgetController] = None,
+    gate_active: bool = False,
+    on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Follow up a run that settled on a transient provider error, within budget.
 
@@ -418,6 +708,11 @@ def _resume_after_transient_errors(
     observed), then sends :data:`RESUME_PROMPT` into the same session. The
     returned result is the latest prompt's, with ``success`` carried forward if
     any earlier prompt already produced a usable assistant turn.
+
+    When ``controller`` is given and ``gate_active``, each attempt also asks
+    ``BudgetController.can_start(RESUME_PREDICTED_OUTPUT_TOKENS,
+    accept_partial=False)`` (C6) before sending; a refusal stops resuming (it
+    does not fail the run -- whatever the session already produced stands).
     """
     policy = resume_policy()
     attempts = 0
@@ -438,6 +733,13 @@ def _resume_after_transient_errors(
                 ),
             )
             break
+        if controller is not None and gate_active:
+            refusal = budget_gate_reason(
+                controller, RESUME_PREDICTED_OUTPUT_TOKENS, accept_partial=False
+            )
+            if refusal is not None:
+                log("budget", "not resuming: {0}".format(refusal))
+                break
         attempts += 1
         log(
             "harness",
@@ -454,14 +756,24 @@ def _resume_after_transient_errors(
             result["interrupted"] = True
             break
         previous_success = bool(result.get("success"))
+        mission = (
+            controller.begin_mission("resume-{0}".format(attempts), RESUME_PREDICTED_OUTPUT_TOKENS)
+            if controller is not None
+            else None
+        )
         try:
-            follow = client.prompt(RESUME_PROMPT, timeout=max(1.0, remaining))
+            follow = client.prompt(RESUME_PROMPT, timeout=max(1.0, remaining), on_event=on_event)
         except PiRpcInterrupted:
             result["interrupted"] = True
             break
         except PiRpcError as exc:
             result["error"] = str(exc)
             break
+        if controller is not None and mission is not None:
+            follow_usage = follow.get("usage")
+            controller.end_mission(
+                mission, getattr(follow_usage, "output", 0) or 0, follow.get("wall_s", 0.0) or 0.0
+            )
         follow["success"] = bool(follow.get("success")) or previous_success
         result = follow
     result["resume_attempts"] = attempts

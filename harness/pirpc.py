@@ -44,7 +44,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .log import log, warn
 from .usage import Usage, is_success_message, message_text
@@ -340,7 +340,12 @@ class PiRpc:
         """Pi's own auto-retry can burn 4 x 300 s on a hung provider call."""
         self.command({"type": "set_auto_retry", "enabled": enabled}, timeout=timeout)
 
-    def prompt(self, text: str, timeout: float) -> Dict[str, Any]:
+    def prompt(
+        self,
+        text: str,
+        timeout: float,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
         """Send a prompt and block until the agent settles or the budget expires.
 
         ``timeout`` is the whole per-call budget and is also the prompt-acceptance
@@ -354,6 +359,13 @@ class PiRpc:
         ``finally`` of ``_runAgentPrompt``. Treating ``agent_end`` as terminal
         killed Pi mid-compaction and reported the half-built app as a success, so
         the per-prompt budget is the only backstop here.
+
+        ``on_event``, when given, is called with every event this prompt sees
+        (in arrival order, including ``message_end`` and ``agent_settled``
+        themselves) so a caller can watch the live stream -- budget accounting,
+        the report watcher -- without re-parsing stdout. A raising callback is
+        logged and otherwise ignored: an observer must never take the session
+        down.
         """
         started = time.monotonic()
         deadline = started + timeout
@@ -393,6 +405,11 @@ class PiRpc:
                 self._eof = True
                 error = "Pi exited mid-prompt"
                 break
+            if on_event is not None:
+                try:
+                    on_event(event)
+                except Exception as exc:  # noqa: BLE001 - an observer must never break the session
+                    warn("prompt on_event callback failed: {0}".format(exc))
             kind = event.get("type")
             if kind == "message_end":
                 message = event.get("message")

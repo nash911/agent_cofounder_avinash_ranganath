@@ -1,0 +1,6 @@
+{
+  "app_name": "Personal Book Tracker",
+  "tagline": "A simple desktop application to catalog your home library and track which books are lent out to friends and family.",
+  "summary": "A single-user desktop application designed to manage a personal book collection. It allows users to catalog books with details like title, author, and category. The core functionality is tracking the lending status of each book, enabling users to record who borrowed a book, clear the status upon return, and view filtered lists of all owned books or just those currently lent out, alongside a count of borrowed items.",
+  "primary_entity": "Book"
+}
