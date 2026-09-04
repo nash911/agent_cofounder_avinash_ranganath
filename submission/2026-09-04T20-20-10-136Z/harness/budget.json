@@ -1,0 +1,15 @@
+{
+  "elapsed_s": 197.353,
+  "cumulative_output": 4036,
+  "peak_output": 4036,
+  "tokens_per_s": 34.187,
+  "predictions": [
+    {
+      "label": "1-combined",
+      "predicted_output": 3300,
+      "predicted_s": 110.0,
+      "actual_output": 4036,
+      "actual_s": 118.058
+    }
+  ]
+}

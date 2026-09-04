@@ -1,0 +1,145 @@
+{
+  "files": {
+    "config": "src/app-config.ts",
+    "tests": "src/journeys.test.tsx"
+  },
+  "leave_alone": [
+    "src/lib/",
+    "src/components/",
+    "src/App.tsx",
+    "src/test/",
+    "src/styles.css",
+    "vitest.config.ts",
+    "package.json"
+  ],
+  "tests": [
+    {
+      "title": "add a book and see it in the list",
+      "kind": "explicit",
+      "steps": "Open the app; the list is empty. Click Add. Enter Title, Author, choose Category. Save.",
+      "expect": "The book appears in the list. The Lent out stat shows 0."
+    },
+    {
+      "title": "reject an empty required field",
+      "kind": "explicit",
+      "steps": "Click Add. Leave Title empty. Enter Author, choose Category. Save.",
+      "expect": "The form shows 'Title is required' and does not save."
+    },
+    {
+      "title": "edit an existing book",
+      "kind": "explicit",
+      "steps": "Pick a book in the list. Click Edit. Change Title. Save.",
+      "expect": "The list shows the updated Title."
+    },
+    {
+      "title": "delete a book added by mistake",
+      "kind": "explicit",
+      "steps": "Pick a book in the list. Click Delete. Confirm.",
+      "expect": "The book is removed from the list."
+    },
+    {
+      "title": "lend a book and show the borrower",
+      "kind": "explicit",
+      "steps": "Pick a book with no Borrower. Click Lend. Enter a name. Save.",
+      "expect": "The book shows the badge 'Lent to {Borrower}'. The Lent out stat increases by 1."
+    },
+    {
+      "title": "return a book and clear the borrower",
+      "kind": "explicit",
+      "steps": "Pick a book that is lent out. Click Return.",
+      "expect": "The 'Lent to {Borrower}' badge disappears. The Lent out stat decreases by 1."
+    },
+    {
+      "title": "filter to see only books that are lent out",
+      "kind": "explicit",
+      "steps": "With some books lent out, click the 'Lent out' filter.",
+      "expect": "The list shows only books where Borrower is not empty. Each shows the 'Lent to {Borrower}' badge."
+    },
+    {
+      "title": "filter to see only books that are at home",
+      "kind": "explicit",
+      "steps": "Click the 'At home' filter.",
+      "expect": "The list shows only books where Borrower is empty. No 'Lent to' badges appear."
+    },
+    {
+      "title": "see how many books are lent out right now",
+      "kind": "explicit",
+      "steps": "Look at the stats area.",
+      "expect": "The 'Lent out' stat shows the count of rows where Borrower is not empty."
+    },
+    {
+      "title": "persist data across a browser refresh",
+      "kind": "explicit",
+      "steps": "Add or lend several books. Refresh the browser.",
+      "expect": "All books, borrowers, and the Lent out stat are unchanged."
+    }
+  ],
+  "implemented_features": [
+    "Add a book and see it in the list",
+    "Reject an empty required field",
+    "Edit an existing book",
+    "Delete a book added by mistake",
+    "Lend a book and show the borrower",
+    "Return a book and clear the borrower",
+    "Filter to see only books that are lent out",
+    "Filter to see only books that are at home",
+    "See how many books are lent out right now",
+    "Persist data across a browser refresh"
+  ],
+  "assumptions": [
+    "The category select uses the three kinds the user named: Novel, Cookbook, Reference.",
+    "A book with no Borrower is considered at home; a book with a Borrower is lent out.",
+    "The headline stat is the count of books currently lent out.",
+    "Omitted due dates or overdue tracking: The idea does not mention when books are due back.",
+    "Omitted multiple copies or quantities per title: The idea treats each book as a single item.",
+    "Omitted user accounts or sharing: The idea states it is just one person on their own computer.",
+    "Omitted shelf location or cover images: The idea does not mention where a book sits or what it looks like.",
+    "Search and alphabetical sorting are provided by the scaffold and are always available."
+  ],
+  "labels": {
+    "fields": {
+      "title": "Title",
+      "author": "Author",
+      "category": "Category",
+      "borrower": "Borrower"
+    },
+    "options": {
+      "category": [
+        "Novel",
+        "Cookbook",
+        "Reference"
+      ]
+    },
+    "filters": [
+      "Lent out",
+      "At home"
+    ],
+    "badges": [
+      "Lent to {Borrower}"
+    ],
+    "stats": [
+      "Lent out"
+    ],
+    "actions": [
+      "Lend",
+      "Return"
+    ],
+    "inputs": [
+      "Borrower name"
+    ],
+    "messages": [
+      "Title is required",
+      "Author is required",
+      "Category is required"
+    ],
+    "copy": {
+      "title": "Home Library",
+      "tagline": "Track books on your shelves and who has them.",
+      "noun": "book",
+      "nounPlural": "books",
+      "addLabel": "Add book",
+      "emptyTitle": "No books yet",
+      "emptyBody": "Add your first book with the form."
+    }
+  }
+}

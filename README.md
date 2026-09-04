@@ -58,10 +58,9 @@ The container exit code is informational; `result.json` is authoritative.
 - `CHALLENGE_THINKING` — default `off`.
 - `CHALLENGE_TIMEOUT_MS` — default `900000`.
 
-Missions always run with thinking off by design (measured: thinking on failed
-the 900 s budget — `docs/measurements.md`, Baseline, "Thinking=high on the same
-starter failed"); `CHALLENGE_THINKING` applies to the fallback single-session
-path. Developer `HARNESS_*` variables are documented in `.env.example` and
+Missions always run with thinking off by design (measured on the unmodified
+starter: thinking on blew the 900 s budget); `CHALLENGE_THINKING` applies to
+the fallback single-session path. Developer `HARNESS_*` variables are documented in `.env.example` and
 `docs/DEVELOPMENT.md`.
 
 ## Where the results are
@@ -77,13 +76,13 @@ for a run is `artifacts/runs/<id>/`:
 - `artifacts/runs/<id>/harness/spec.json` — the derived specification.
 - `artifacts/runs/<id>/app-test-results.json` — the runner's own vitest report.
 
-`submission/2026-09-04T08-22-16-413Z/` is the committed reference run: the
+`submission/2026-09-04T20-20-10-136Z/` is the committed reference run: the
 public idea on the final code.
 
 ## Verify
 
 ```bash
-npm run verify:telemetry -- artifacts/runs/2026-09-04T08-22-16-413Z result.json
+npm run verify:telemetry -- artifacts/runs/2026-09-04T20-20-10-136Z result.json
 npm run validate:result -- result.json
 ```
 
@@ -110,21 +109,28 @@ python3 -m unittest discover -s harness/tests -t . -p 'test_*.py'
 ## Results
 
 Points = input + 3 × output + 0.1 × cache read; lower is better. Public idea,
-GLM-5.2. Full tables in `docs/measurements.md`.
+GLM-5.2.
 
 | Run | Points | Model calls | Agent phase |
 |---|---|---|---|
 | Unmodified starter baseline | 79,976 | 26 | 562 s (wall) |
-| This harness, reference run | 17,178 | 6 | ~2 min, 1 repair round |
+| This harness, reference run | 31,065 | 6 | ~3 min, no repair, cold prompt cache |
 
-Combined mode on the public idea bands at 14.6k–17.6k points, 3–6 calls,
-42–64 s agent phase ("Phase 3 conclusion"). Blind holdout — five unseen ideas,
-two runs each — passed 9 of 10 gates on the first sweep; after the four
-documented fixes every re-run case passes ("Phase 4 fixes verified"). The same
-holdout on the smaller `Qwen/Qwen3.8-27B-FP8` passes 3 of 5 gates with every
-run inside the 900 s budget ("Phase 5").
+Combined mode on the public idea bands at 14.6k–29k points, 3–11 calls.
+Blind holdout — five unseen ideas, two runs each — passed 9 of 10 gates on the
+first sweep. A second holdout of five ideas written by a third party exposed
+six shape-level gaps (computed values, actions over every record, currency
+units, date arithmetic, deletions, invented dialogs); the fixes are scaffold
+primitives and brief rules, none naming a case. On the final code all ten
+holdout ideas plus the organizers' practice prompt pass the gate: 9 of 11 in
+one clean sweep at a mean of 31.6k points, the two misses passing on a rerun
+after the last two fixes. The same original holdout on the smaller
+`Qwen/Qwen3.8-27B-FP8` passed 3 of 5 gates with every run inside the 900 s
+budget. Holdout text stays outside the repository.
 
-**TODO (before submission): native arm64 timing from the cloud run.**
+The judged linux/arm64 image ran one full challenge under QEMU emulation on
+the pre-holdout code: `success`, 3 model calls, 13,440 points. Emulated wall
+time is not reported; a native arm64 timing was not taken.
 
 ## How it works
 

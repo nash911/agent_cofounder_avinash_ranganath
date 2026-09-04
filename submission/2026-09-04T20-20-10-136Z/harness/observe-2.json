@@ -1,0 +1,48 @@
+{
+  "tsc_ran": true,
+  "tsc_ok": true,
+  "tsc_errors": [],
+  "vitest": {
+    "green": true,
+    "total": 10,
+    "passed": 10,
+    "failed": 0,
+    "names": [
+      "journeys add a book and see it in the list",
+      "journeys reject an empty required field",
+      "journeys edit an existing book",
+      "journeys delete a book added by mistake",
+      "journeys lend a book and show the borrower",
+      "journeys return a book and clear the borrower",
+      "journeys filter to see only books that are lent out",
+      "journeys filter to see only books that are at home",
+      "journeys see how many books are lent out right now",
+      "journeys persist data across a browser refresh"
+    ],
+    "failures": []
+  },
+  "build_ran": true,
+  "build_ok": true,
+  "build_tail": "vite v7.3.6 building client environment for production...\ntransforming...\n\u2713 50 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                   0.51 kB \u2502 gzip:  0.31 kB\ndist/assets/index-B_5CQEki.css   10.71 kB \u2502 gzip:  2.52 kB\ndist/assets/index-CoH3DqsM.js   219.85 kB \u2502 gzip: 69.43 kB\n\u2713 built in 491ms",
+  "files": {
+    "src/app-config.ts": {
+      "exists": true,
+      "lines": 52,
+      "changed_from_seed": true
+    },
+    "src/journeys.test.tsx": {
+      "exists": true,
+      "lines": 97,
+      "changed_from_seed": true
+    }
+  },
+  "over_limit": [],
+  "coverage": {
+    "missing": [],
+    "matched": 10,
+    "total": 10
+  },
+  "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+  "green": true,
+  "elapsed_s": 4.514
+}

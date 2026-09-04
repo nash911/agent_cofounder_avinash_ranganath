@@ -1,0 +1,82 @@
+{
+  "decisions": [
+    {
+      "n": 1,
+      "action": "build",
+      "role": "",
+      "source": "policy",
+      "rationale": "green; production build not run yet",
+      "hint": "",
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "mission": null
+    },
+    {
+      "n": 2,
+      "action": "done",
+      "role": "",
+      "source": "policy",
+      "rationale": "green and the production build passed",
+      "hint": "",
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "mission": null
+    }
+  ],
+  "observations": [
+    {
+      "n": 1,
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "green": true,
+      "tsc_ok": true,
+      "tsc_errors": [],
+      "vitest": {
+        "green": true,
+        "passed": 10,
+        "failed": 0,
+        "failures": []
+      },
+      "build_ran": false,
+      "build_ok": null,
+      "over_limit": [],
+      "coverage_missing": [],
+      "elapsed_s": 3.814
+    },
+    {
+      "n": 2,
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "green": true,
+      "tsc_ok": true,
+      "tsc_errors": [],
+      "vitest": {
+        "green": true,
+        "passed": 10,
+        "failed": 0,
+        "failures": []
+      },
+      "build_ran": true,
+      "build_ok": true,
+      "over_limit": [],
+      "coverage_missing": [],
+      "elapsed_s": 4.514
+    }
+  ],
+  "repairs": 0,
+  "repair_cap": 3,
+  "reruns": {
+    "builder": 0,
+    "tester": 0
+  },
+  "no_progress": 0,
+  "no_progress_cap": 2,
+  "builds": 1,
+  "tsc_skipped": 0,
+  "model_calls": 0,
+  "model_thinking_calls": 0,
+  "coverage_repair": false,
+  "review": {
+    "enabled": false,
+    "ran": false,
+    "findings": []
+  },
+  "final_action": "done",
+  "final_rationale": "green and the production build passed"
+}
