@@ -35,6 +35,8 @@ export interface SubmissionResult {
   destination: string;
   copiedRootResult: boolean;
   copiedAppResult: boolean;
+  /** Set when the two result.json files were deliberately not copied. */
+  resultFilesSkipped?: string;
 }
 
 /**
@@ -51,6 +53,21 @@ export function buildSubmission(repositoryRoot: string, runId: string): Submissi
   const destination = path.join(repositoryRoot, "submission", runId);
   mkdirSync(destination, { recursive: true });
   cpSync(runDir, destination, { recursive: true });
+
+  // result.json (root and output/app) always describe the LATEST run: the
+  // runner rewrites both on every challenge. Copying them next to an older
+  // run's artifacts would pair one run's telemetry with another run's logs,
+  // and `verify:telemetry` would then fail on the committed reference run.
+  const latest = latestRunId(repositoryRoot);
+  if (runId !== latest) {
+    return {
+      runDir,
+      destination,
+      copiedRootResult: false,
+      copiedAppResult: false,
+      resultFilesSkipped: `result.json files belong to the latest run (${latest}), not ${runId}; re-run the challenge or pass the latest run id`,
+    };
+  }
 
   const rootResultPath = path.join(repositoryRoot, "result.json");
   const copiedRootResult = existsSync(rootResultPath);
@@ -71,6 +88,10 @@ function main(): void {
   const runId = process.argv[2] ?? latestRunId(REPOSITORY_ROOT);
   const result = buildSubmission(REPOSITORY_ROOT, runId);
   console.log(`Copied ${result.runDir} to ${result.destination}`);
+  if (result.resultFilesSkipped) {
+    console.warn(result.resultFilesSkipped);
+    return;
+  }
   if (result.copiedRootResult) {
     console.log(`Copied result.json to ${path.join(result.destination, "result.json")}`);
   } else {

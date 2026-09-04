@@ -20,6 +20,12 @@ coverage/
 .idea/
 temp/
 
+# Blind-evaluation material (BUILD_PLAN §4). Holdout ideas, the snapshots a
+# run leaves behind and the eval reports must never be tracked: a committed
+# holdout is a holdout the pipeline has effectively seen. `harness/eval.py`
+# refuses paths inside the repository, and this line is the second lock.
+evals/
+
 # Pi writes credentials into the config directory on /login; the committed
 # .pi-agent/ holds only models.json and settings.json.
 .pi-agent/auth.json
