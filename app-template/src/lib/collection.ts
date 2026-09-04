@@ -123,7 +123,8 @@ export function emptyTextFor(config: AnyConfig, filterId: string): string | unde
     return stateFilters(config).find((entry) => entry.id === id)?.emptyText;
   }
   if (filterId.startsWith("field:")) {
-    return `No ${config.copy.nounPlural} in this view.`;
+    const declared = fieldFilters(config).find((entry) => entry.emptyText !== undefined);
+    return declared?.emptyText ?? `No ${config.copy.nounPlural} in this view.`;
   }
   return undefined;
 }

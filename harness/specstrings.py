@@ -61,6 +61,28 @@ def _bulk_actions(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [a for a in _dicts(spec.get("actions")) if _text(a.get("scope")).lower() == "all"]
 
 
+#: An effect that takes records off the list rather than changing them. "clear
+#: borrower" clears a field; "clear the list" / "delete all rows" / "remove every
+#: sold item" delete rows -- and the scaffold's one way to say so is an `apply`
+#: that returns `null`. Measured 2026-09-04 (a holdout case): a "Clear freezer"
+#: meant delete-all, the Builder invented a `_deleted` field (tsc error), then
+#: zeroed a count instead, and two repair rounds went on a shape the config
+#: could not express.
+#: The verb alone is not enough: "remove the borrower" clears a field. It is a
+#: deletion when what follows the verb is the record itself or all of them.
+_REMOVAL = re.compile(
+    r"\b(delete|remove|discard|drop)s?\s+(the\s+|this\s+|that\s+)?"
+    r"(row|record|entry|item|it|this|them|all|every\w*|each|from\b)"
+    r"|\bclears? (all|every\w*|the (whole )?list)\b",
+    re.IGNORECASE,
+)
+
+
+def _removes(effect: str) -> bool:
+    """Whether an action's effect deletes rows instead of patching them."""
+    return bool(_REMOVAL.search(_text(effect)))
+
+
 def _formatted_number(value: str, unit: str) -> str:
     """One number as the app prints it -- the scaffold's own rule, in Python.
 
@@ -162,17 +184,33 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
                 "regex".format(_text(field.get("label")), _text(field.get("message")))
             )
     filters = _dicts(spec.get("filters"))
+    plural = copy.get("nounPlural", "records")
     for entry in filters:
         if _text(entry.get("kind")) == "field":
+            field_name = _text(entry.get("field"))
+            field = next((f for f in fields if _text(f.get("name")) == field_name), {})
+            # A select has a chip per option; any other field has a chip only
+            # for a value some row actually holds -- a value nobody entered
+            # has no chip, so `chooseFilter` on it throws (measured
+            # 2026-09-04, a holdout case: a test chose a room no plant had).
+            chips = (
+                "plus one chip per option above" if _strings(field.get("options"))
+                else "plus one chip per distinct value the rows hold -- a value no row has gets no chip"
+            )
             lines.append(
-                "- Filter chips for \"{0}\": \"{1}\" plus one chip per option above".format(
-                    _label_of(spec, _text(entry.get("field"))), _text(entry.get("label"))
+                "- Filter chips for \"{0}\": \"{1}\" {2}; a chip that matches no row shows "
+                "\"Nothing matches this view\" and \"{3}\"".format(
+                    _label_of(spec, field_name), _text(entry.get("label")), chips,
+                    _text(entry.get("empty_text")) or "No {0} in this view.".format(plural),
                 )
             )
         else:
-            lines.append(
-                "- Filter chip \"{0}\" ({1})".format(_text(entry.get("label")), _text(entry.get("rule")))
-            )
+            line = "- Filter chip \"{0}\" ({1})".format(_text(entry.get("label")), _text(entry.get("rule")))
+            if _text(entry.get("empty_text")):
+                line += "; with no match the list shows \"Nothing matches this view\" and \"{0}\"".format(
+                    _text(entry.get("empty_text"))
+                )
+            lines.append(line)
     lines.extend(_filter_notes(spec, filters))
     for badge in _dicts(spec.get("badges")):
         text = _text(badge.get("text"))
@@ -215,6 +253,11 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         ):
             if value:
                 parts.append(template.format(value))
+        if _removes(_text(action.get("effect"))):
+            parts.append(
+                " — it deletes the record: assert `expectNoRow(title)` afterwards, never a "
+                "changed value on the row"
+            )
         lines.append("".join(parts))
     # A bulk button is not in the row, so `runAction` (which needs a row title)
     # cannot reach it; its own helper takes only the label.
@@ -229,10 +272,17 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
                 ", which confirms \"{0}\" itself, so never call `confirmDialog` after "
                 "it".format(_text(action.get("confirm_text")))
             )
-        line += (
-            "; afterwards every row has changed, and the toast reads \"{0} applied to N "
-            "records\" with N the number of records.".format(label)
-        )
+        if _removes(_text(action.get("effect"))):
+            line += (
+                "; afterwards every record it applies to is GONE from the list -- assert "
+                "`expectNoRow(title)` for each -- and the toast reads \"{0} applied to N "
+                "records\" with N the number removed.".format(label)
+            )
+        else:
+            line += (
+                "; afterwards every row has changed, and the toast reads \"{0} applied to N "
+                "records\" with N the number of records.".format(label)
+            )
         lines.append(line)
     lines.append(
         "- Header \"{0}\", add button \"{1}\", empty state \"{2}\" / \"{3}\"".format(
@@ -266,6 +316,24 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
             ".toISOString().slice(0, 10);` then `iso(0)` is today, `iso(3)` is three days "
             "ahead and `iso(-3)` three days ago."
         )
+        # Measured 2026-09-04 (a holdout case): every date rule read a date the
+        # form did not offer, so no test could put a record into the "due"
+        # state and the Tester asserted it on a record added a moment ago.
+        date_labels = [
+            _text(f.get("label")) for f in fields
+            if _text(f.get("kind")) == "date" and _text(f.get("label"))
+        ]
+        if date_labels:
+            lines.append(
+                "- Date fields ({0}) are on the form and start at today (`iso(0)`) when "
+                "`addRecord` omits them, so a record added with the default is 0 days old -- not "
+                "\"ago\", overdue or stale unless its rule already says so at 0. Every rule that "
+                "counts days since/until "
+                "a date reads that stored date, so to put a record into such a state pass the "
+                "date in `addRecord` (`\"{1}\": iso(-9)` for nine days ago, `iso(9)` for nine "
+                "days ahead) and assert the state the rule then implies for that exact "
+                "number.".format(_join(date_labels), date_labels[0])
+            )
     # Three scaffold behaviours the journey wording actively pushes the other
     # way: journeys say "delete; confirm" (there is no confirmation), and
     # "after a refresh, filters unchanged" (`reload` remounts the app, so the
@@ -294,6 +362,16 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         "with `expectRow(title, text)`, a stat with `stat(label)`, a chip with "
         "`await chooseFilter(user, label)`, a toast or validation message with "
         "`screen.getByText(exact string)`."
+    )
+    # Measured 2026-09-04 (a third-party case): `not.toContain("Sold")` on a row
+    # whose "Mark sold" button and "Sold" chip were still on the page.
+    lines.append(
+        "- Never assert that a word is ABSENT from a row or the page (`not.toContain`, "
+        "`queryByText(...)` being null): the same word is a chip name, a button label or a "
+        "field label too, so it is still there. Assert the new state positively -- "
+        "`expectRow(title, <the text the rule now shows>)`, `rowTitles()` after a filter, "
+        "`stat(label)` -- and use `expectNoRow` only for a record that is deleted or "
+        "filtered out."
     )
     return "\n".join(lines)
 

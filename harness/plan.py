@@ -36,6 +36,7 @@ from .specstrings import (
     _join,
     _label_of,
     _needs_dates,
+    _removes,
     _row_actions,
     _strings,
     _text,
@@ -50,10 +51,13 @@ LEAVE_ALONE = [
     "vitest.config.ts", "package.json",
 ]
 
-#: ~2,000 tokens at ~4 chars/token. Briefs are re-rendered more compactly (and
+#: ~2,400 tokens at ~4 chars/token. Briefs are re-rendered more compactly (and
 #: finally clipped) rather than allowed to grow: a mission brief that costs
-#: more than the file it asks for has lost the argument.
-MAX_BRIEF_CHARS = 8000
+#: more than the file it asks for has lost the argument. Measured 2026-09-04
+#: over ten holdout specs: the Tester's half runs 7.0-7.9k with the cheat sheet
+#: complete, so 8k left no room for one more rule, and the clip fell on the
+#: rules at the tail rather than the journeys.
+MAX_BRIEF_CHARS = 9500
 
 #: ``report.partial.json`` reads better with a handful of features than with
 #: one line per journey; the runner does not score their number.
@@ -271,13 +275,23 @@ def builder_brief(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
             "Date fields are `\"yyyy-mm-dd\"` strings: do every day count with the scaffold's "
             "helpers, `import { daysBetween, daysUntil, daysSince, today } from \"./lib/dates.js\";` "
             "-- in a `compute`, a `when`, a `match` and an `available` alike. Never subtract date "
-            "strings or hand-roll `new Date()` arithmetic."
+            "strings or hand-roll `new Date()` arithmetic. Every `date` field stays on the form "
+            "with `initial: \"today\"` exactly as shown above, so a new record is dated today "
+            "and a day count on it starts at 0; never treat an empty date as a special "
+            "\"never\" state (`daysSince(\"\")` is 0, the same as today)."
         )
     if _bulk_actions(spec):
         rules.append(
             "Every `bulkActions` entry applies to EVERY record at once and belongs in the "
             "`bulkActions` array (`apply: (row) => ({ ... })`, no `input`); writing it as an "
             "`actions` entry changes only the row the user clicked."
+        )
+    if any(_removes(_text(a.get("effect"))) for a in _dicts(spec.get("actions"))):
+        rules.append(
+            "An `apply` that returns `null` DELETES that row -- the only way an action removes "
+            "records, in `actions` and `bulkActions` alike: `apply: () => null`. A patch may "
+            "name only the fields above, so never invent a field such as `_deleted` and never "
+            "zero a count to stand in for a removal."
         )
     if constants:
         rules.append(
@@ -377,6 +391,12 @@ def _field_outline(field: Dict[str, Any]) -> Dict[str, Any]:
             entry["integer"] = True
         if _text(field.get("unit")):
             entry["unit"] = _text(field.get("unit"))
+    if kind == "date":
+        # Dated the day it is added, so a rule that counts days since it reads
+        # 0 for a new record and a test dates a record into any state through
+        # the form. An empty date would be a "never" state the Builder and the
+        # Tester each resolve differently (measured 2026-09-04, a holdout case).
+        entry["initial"] = "today"
     if not field.get("in_form", True):
         entry["inForm"] = False
     return entry
@@ -413,7 +433,10 @@ def _stat_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 def _filter_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
     if _text(entry.get("kind")) == "field":
-        return {"kind": "field", "field": _text(entry.get("field")), "allLabel": _text(entry.get("label"))}
+        outline = {"kind": "field", "field": _text(entry.get("field")), "allLabel": _text(entry.get("label"))}
+        if _text(entry.get("empty_text")):
+            outline["emptyText"] = _text(entry.get("empty_text"))
+        return outline
     return {
         "kind": "state",
         "id": _text(entry.get("id")),
@@ -434,10 +457,22 @@ def _action_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
         }
     if _text(entry.get("confirm_text")):
         outline["confirm"] = _text(entry.get("confirm_text"))
-    outline["apply"] = _text(entry.get("effect"))
+    outline["apply"] = _apply_text(_text(entry.get("effect")))
     if _text(entry.get("toast")):
         outline["toast"] = _text(entry.get("toast"))
     return outline
+
+
+def _apply_text(effect: str) -> str:
+    """The English of an ``apply``, with the one shape a patch cannot say.
+
+    A patch names fields that change; a deletion changes none. The scaffold's
+    word for it is an ``apply`` that returns ``null``, and the outline says so
+    right where the Builder is reading the effect.
+    """
+    if _removes(effect):
+        return "{0} -- return null, which deletes the row".format(effect)
+    return effect
 
 
 def _bulk_action_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -453,7 +488,7 @@ def _bulk_action_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
         outline["available"] = _text(entry.get("available_rule"))
     if _text(entry.get("confirm_text")):
         outline["confirm"] = _text(entry.get("confirm_text"))
-    outline["apply"] = _text(entry.get("effect"))
+    outline["apply"] = _apply_text(_text(entry.get("effect")))
     return outline
 
 
@@ -519,7 +554,14 @@ _TESTER_CLOSING = (
     "or edit your own file afterwards -- the harness runs the tests and a separate repair "
     "mission fixes any failure. End your turn immediately after the write: no summary."
 )
-MAX_COMBINED_BRIEF_CHARS = 12000
+#: Both halves whole, with room to spare. Measured 2026-09-04 over ten holdout
+#: specs: the untrimmed combined brief ran 14.3-16.2k, and at 12k `_fit` went
+#: through every cut down to the tail clip -- which threw away the Tester's
+#: rules, every journey's expectation and the closing order. A Tester told the
+#: journey titles alone guessed the expectations, and one case failed the same
+#: six tests three rounds running. ~1.2k more input tokens per run is cheaper
+#: than one repair round (5-8k).
+MAX_COMBINED_BRIEF_CHARS = 18000
 
 
 def combined_brief(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:

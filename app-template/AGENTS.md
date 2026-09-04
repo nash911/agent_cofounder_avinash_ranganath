@@ -44,12 +44,20 @@ Three keys sit beside `fields`, never inside it:
   name.
 - **`bulkActions`** — one button that changes EVERY record at once (a reset, a
   clear-all, an archive-all):
-  `{ id, label, confirm?, available?: (row) => boolean, apply: (row) => Patch }`.
+  `{ id, label, confirm?, available?: (row) => boolean, apply: (row) => Patch | null }`.
   It renders in its own toolbar between the stats and the filters and patches
   every row `available` accepts — all of them by default — whatever the filter
   happens to be showing, then reports `<label> applied to N records`. A button
-  on one row is `actions`; "for all of them" is `bulkActions`.
+  on one row is `actions`; "for all of them" is `bulkActions`. An `apply` that
+  returns `null` DELETES the row instead of patching it — in `actions` and
+  `bulkActions` alike, so a clear-all is `apply: () => null`. It is the only way
+  an action removes records: never invent a field for it or zero a count.
 - **`summary[].unit`** — the unit a stat tile renders its figure with.
+
+A `field` filter is `{ kind: "field", field, allLabel?, emptyText? }`; a
+`state` filter is `{ kind: "state", id, label, match, emptyText? }`. A patch
+(`apply`'s return) takes any string for a select field, so
+`apply: () => ({ status: "Sold" })` is fine as written.
 
 **Numbers read the same way everywhere.** A unit that is a currency symbol
 (`£ $ € ¥`) — or any other single non-alphanumeric character — comes BEFORE the
@@ -59,12 +67,16 @@ same money never renders two ways. Booleans read as `Yes` / `No`.
 
 **Date rules come from `src/lib/dates.ts`; never hand-roll them.** Import them
 with `import { daysBetween, daysUntil, daysSince, today } from "./lib/dates.js";`.
-`today()` is today as `yyyy-mm-dd`, local. `daysBetween(a, b)` is whole days
+`today()` is today as `yyyy-mm-dd` (the UTC calendar date — the one
+`initial: "today"` stores and a test's `iso(0)` produces). `daysBetween(a, b)` is whole days
 from `a` to `b`. `daysUntil(iso)` counts forward from today, so "within the
 next 3 days" is `daysUntil(row.due) <= 3 && daysUntil(row.due) >= 0`.
 `daysSince(iso)` counts back, so "more than 7 days ago" is
 `daysSince(row.seen) > 7`. An unset or malformed date gives `0`;
-`isValidDate(iso)` says whether one is real. A test writes a date as an offset
+`isValidDate(iso)` says whether one is real. Every `date` field a rule reads
+stays on the form with `initial: "today"` (like `checked` below): a record is
+dated the day it is added and a test can date it into the past, so never model
+a "never yet" state as an empty date. A test writes a date as an offset
 from today, never as a literal, so it cannot rot: see the template below.
 
 ## Rules

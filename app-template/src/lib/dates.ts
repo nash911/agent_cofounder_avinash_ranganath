@@ -27,11 +27,13 @@ function stampOf(iso: string): number | undefined {
   return same ? stamp : undefined;
 }
 
-/** Today in the reader's own timezone, as `yyyy-mm-dd`. */
+/** Today as `yyyy-mm-dd`, the UTC calendar date — the same date a `date`
+ *  field's `initial: "today"` stores and the same one a test's
+ *  `new Date(...).toISOString().slice(0, 10)` produces, so a rule, a stored
+ *  value and an assertion never disagree about which day it is, whatever the
+ *  clock says locally. */
 export function today(): string {
-  const now = new Date();
-  const pad = (value: number): string => String(value).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  return new Date().toISOString().slice(0, 10);
 }
 
 /** True when `iso` is a real `yyyy-mm-dd` calendar date. "" is false. */

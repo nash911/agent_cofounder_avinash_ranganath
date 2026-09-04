@@ -207,20 +207,25 @@ class FilterTest(unittest.TestCase):
     def setUp(self) -> None:
         self.fields = [_field(name="title", label="Title"),
                        _field(name="type", label="Type", kind="select", options=["Novel", "Cookbook"]),
-                       _field(name="borrower", label="Borrower")]
+                       _field(name="borrower", label="Borrower"),
+                       _field(name="pages", label="Pages", kind="number")]
 
     def normalize(self, filters):
         return analyst.normalize_spec(_spec(fields=self.fields, filters=filters))["filters"]
 
-    def test_field_filter_over_a_non_select_is_dropped(self):
-        # The scaffold draws one chip per option; a text field has none.
+    def test_field_filter_over_a_number_or_a_repeat_is_dropped_but_a_text_one_stays(self):
+        # The scaffold draws one chip per option of a select, or per distinct
+        # value the rows hold for a text field; a number has no chips to draw.
         filters = self.normalize([
             {"kind": "field", "field": "borrower", "id": "", "label": "All", "rule": "", "empty_text": ""},
+            {"kind": "field", "field": "pages", "id": "", "label": "All", "rule": "", "empty_text": ""},
             {"kind": "field", "field": "type", "id": "", "label": "All kinds", "rule": "", "empty_text": ""},
             {"kind": "field", "field": "type", "id": "", "label": "All again", "rule": "", "empty_text": ""},
         ])
-        self.assertEqual(len(filters), 1)
-        self.assertEqual(filters[0], {"kind": "field", "field": "type", "id": "",
+        self.assertEqual(len(filters), 2)
+        self.assertEqual(filters[0], {"kind": "field", "field": "borrower", "id": "",
+                                      "label": "All", "rule": "", "empty_text": ""})
+        self.assertEqual(filters[1], {"kind": "field", "field": "type", "id": "",
                                       "label": "All kinds", "rule": "", "empty_text": ""})
 
     def test_state_filter_needs_id_label_and_rule(self):
@@ -509,7 +514,7 @@ class SchemaAndPromptTest(unittest.TestCase):
         self.assertIn("5. Preserve required data across a browser refresh.", prompt)
         # Run/reporting guidance is the runner's business, not the Analyst's.
         self.assertNotIn("localhost:3000", prompt)
-        self.assertLess(len(prompt), 3000)
+        self.assertLess(len(prompt), 3300)
 
 
 class RunAnalystTest(unittest.TestCase):

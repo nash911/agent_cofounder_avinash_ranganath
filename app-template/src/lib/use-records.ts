@@ -21,7 +21,8 @@ export interface RecordsApi {
   edit(id: string, values: RowPatch): void;
   remove(id: string): void;
   runAction(action: ActionDef<readonly FieldDef[]>, row: Row, input: string): void;
-  /** Applies one patch to every record the action accepts, in one step. */
+  /** Applies one patch to every record the action accepts, in one step;
+   *  a `null` patch deletes that record instead. */
   runBulkAction(action: BulkActionDef<readonly FieldDef[]>): void;
   dismissToast(): void;
   dismissNotice(): void;
@@ -94,10 +95,19 @@ export function useRecords(config: AnyConfig, repository: Repository): RecordsAp
   const runAction = useCallback((
     action: ActionDef<readonly FieldDef[]>, row: Row, input: string,
   ) => {
-    repository.update(row.id, action.apply(row, input));
+    const patch = action.apply(row, input);
     const text = action.toast?.(row);
+    if (patch === null) {
+      // `null` deletes: the same path as the Delete button, so the row is
+      // undoable and the toast is the familiar one unless the action names its own.
+      if (text === undefined || text === "") { remove(row.id); return; }
+      repository.remove(row.id);
+      showToast({ text });
+      return;
+    }
+    repository.update(row.id, patch);
     if (text !== undefined && text !== "") showToast({ text });
-  }, [repository, showToast]);
+  }, [remove, repository, showToast]);
 
   const runBulkAction = useCallback((
     action: BulkActionDef<readonly FieldDef[]>,
@@ -106,7 +116,11 @@ export function useRecords(config: AnyConfig, repository: Repository): RecordsAp
     // them, and a chip left pressed must never silently shrink its reach.
     const targets = repository.list()
       .filter((row) => (action.available ? action.available(row) : true));
-    for (const row of targets) repository.update(row.id, action.apply(row));
+    for (const row of targets) {
+      const patch = action.apply(row);
+      if (patch === null) repository.remove(row.id);
+      else repository.update(row.id, patch);
+    }
     showToast({ text: `${action.label} applied to ${targets.length} records` });
   }, [repository, showToast]);
 

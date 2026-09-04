@@ -187,9 +187,9 @@ SCHEMA: Dict[str, Any] = _obj({
 #: free-text note, and the journey rule is what stops the model pruning the
 #: implied behaviours the scorer looks for.
 SYSTEM_PROMPT = """You turn a non-technical product idea into a precise specification for a single-record-type browser app rendered from one configuration: fields, filters, badges, stats and actions over one list of records. Extract only what the idea states or implies; add nothing else.
-Mapping rules: each attribute named -> one field (a quantity is number, a fixed set of choices is select with Title Case options; a value only set by an action, like a borrower, is a field with in_form=false). 'which ones are X now' -> a state filter. 'how many are X' -> a stat (emphasis on the headline one). 'one type at a time' -> a field filter on the select. Anything that should stand out -> a badge whose text is what the user reads. Any verb other than add/edit/delete -> an action. Any vague threshold ('a couple', 'running low', 'overdue') -> a constant plus one assumption.
+Mapping rules: each attribute named -> one field (a quantity is number, a fixed set of choices is select with Title Case options; a value only set by an action, like a borrower, is a field with in_form=false; a date is always in_form=true, even when an action also sets it). 'which ones are X now' -> a state filter. 'how many are X' -> a stat (emphasis on the headline one). 'one type at a time' / 'one room at a time' -> a field filter on that select or text field. Anything that should stand out -> a badge whose text is what the user reads. Any verb other than add/edit/delete -> an action. Any vague threshold ('a couple', 'running low', 'overdue') -> a constant plus one assumption.
 Computed values: a value worked out from other fields -- a difference of two dates, the days until or since a date, a quantity times a price -- is a derived entry, never an input field the user types. Write its rule over the field names ('days between Start and End', 'Quantity times Price'), and phrase every date rule as 'days until/since/between' -- in a derived, filter or badge rule alike.
-Scope: an effect applied to every record at once (a reset, a clear-all, an archive-all) is one action with scope 'all'; anything done to the record the user picked is scope 'row'.
+Scope: an effect applied to every record at once (a reset, a clear-all, an archive-all) is one action with scope 'all'; anything done to the record the user picked is scope 'row'. An effect that takes records off the list ('clear the list', 'remove every sold item') is worded 'delete the row' / 'delete all rows'.
 Units: a currency symbol is a unit ('£'), on the number field and on every stat or derived value that reads as money; a counted thing keeps its word unit ('pts', 'days').
 Journeys: one per observable behaviour the idea states or implies, in the order a user would meet them; always include add, edit, delete, each filter, each stat, each derived value, each action, refresh persistence, and rejecting an empty required field. Never omit an implied journey merely to simplify. Patterns the idea does not imply go in omitted_patterns with the reason, not in journeys.
 Style: journey titles are lowercase verb phrases ('lends a book and shows the borrower'); steps and expectations quote the field labels, option values, badge texts and action labels exactly as you named them; an action's effect names only the field change ('set borrower to the input'), never a prompt or dialog; a stat's rule is 'count of all rows', 'count of rows where <predicate>' or 'sum of <field>'; a badge that announces a value shows it ('Lent to {borrower}') and its text differs from every stat label and filter label.
@@ -369,7 +369,12 @@ def _normalize_fields(raw_fields: Any) -> Tuple[List[Dict[str, Any]], List[str]]
             # cause, so the Analyst gets to say otherwise.
             "integer": bool(raw.get("integer", True)) if kind == "number" else False,
             "unit": _text(raw.get("unit")) if kind == "number" else "",
-            "in_form": bool(raw.get("in_form", True)),
+            # A date is always on the form, whatever the Analyst said: a date only
+            # an action sets ("last watered") can never be given a PAST value, so
+            # every rule that counts days since it is untestable -- measured
+            # 2026-09-04 (a holdout case): the Tester had no way to make a plant
+            # due and guessed, and six tests failed the same way three times.
+            "in_form": True if kind == "date" else bool(raw.get("in_form", True)),
             "message": message if required else "",
         })
     return fields, used
@@ -481,7 +486,13 @@ def _normalize_constants(raw_constants: Any) -> List[Dict[str, Any]]:
 
 
 def _normalize_filters(raw_filters: Any, fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    selects = [field["name"] for field in fields if field["kind"] == "select"]
+    # A field filter draws one chip per option of a select, or per distinct
+    # value the rows hold for a text field ("one room at a time"): the
+    # scaffold's `filterOptions` reads the values from the rows, so a text
+    # field filters as well as a select does. Measured 2026-09-04 (a holdout
+    # case): the room filter was dropped here while its journey stayed, and
+    # the Tester wrote that journey with no chip line to go on.
+    selects = [field["name"] for field in fields if field["kind"] in ("select", "text")]
     filters: List[Dict[str, Any]] = []
     used_ids: List[str] = []
     used_fields: List[str] = []
@@ -493,14 +504,15 @@ def _normalize_filters(raw_filters: Any, fields: List[Dict[str, Any]]) -> List[D
         if kind not in ("field", "state"):
             kind = "field" if field in selects else "state"
         if kind == "field":
-            # A field filter renders that select's own options as chips; over a
-            # non-select (or twice over the same one) there is nothing to draw.
+            # Over a number, date or boolean (or twice over the same field)
+            # there is nothing sensible to draw.
             if field not in selects or field in used_fields:
                 continue
             used_fields.append(field)
             filters.append({
                 "kind": "field", "field": field, "id": "",
-                "label": _text(raw.get("label")) or "All", "rule": "", "empty_text": "",
+                "label": _text(raw.get("label")) or "All", "rule": "",
+                "empty_text": _text(raw.get("empty_text")),
             })
             continue
         identifier = _camel(_text(raw.get("id")))

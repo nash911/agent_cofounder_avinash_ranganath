@@ -63,15 +63,24 @@ export type RowOf<F extends readonly FieldDef[]> =
   { readonly id: string; readonly createdAt: number } &
   { readonly [K in F[number] as K["name"]]: ValueOfField<K> };
 
+/** What a patch may hold for one field. A stored select value is its exact
+ *  option (so `row.status === "Sold"` type-checks), but a patch accepts any
+ *  string for it: a parameter-less `apply: () => ({ status: "Sold" })` is
+ *  type-checked before `fields` is inferred, which widens the literal to
+ *  `string` and would otherwise fail TS2322 on every such action. */
+export type PatchValue<V> = V extends string ? string : V;
+
 export type Patch<F extends readonly FieldDef[]> =
-  Partial<Omit<RowOf<F>, "id" | "createdAt">>;
+  Partial<{ readonly [K in F[number] as K["name"]]: PatchValue<ValueOfField<K>> }>;
 
 export type Tone = "neutral" | "info" | "good" | "warn" | "alert";
 
 /** Narrowing: by a stored field's options, or by a derived state predicate. */
 export type Filter<F extends readonly FieldDef[]> =
   | { readonly kind: "field"; readonly field: F[number]["name"];
-      readonly allLabel?: string }
+      readonly allLabel?: string;
+      /** Shown when the chosen value matches no row. */
+      readonly emptyText?: string }
   | { readonly kind: "state"; readonly id: string; readonly label: string;
       readonly match: (row: RowOf<F>) => boolean;
       readonly emptyText?: string };
@@ -107,8 +116,11 @@ export interface BulkActionDef<F extends readonly FieldDef[]> {
   readonly confirm?: string;
   /** Limit which rows are touched. Default: every row. */
   readonly available?: (row: RowOf<F>) => boolean;
-  /** Return only the fields that change, for one row at a time. */
-  readonly apply: (row: RowOf<F>) => Patch<F>;
+  /** Return only the fields that change, for one row at a time — or `null`
+   *  to DELETE that row. `null` is the only way an action removes records
+   *  (a clear-all, a "remove every sold item"): never fake a removal with a
+   *  made-up field or a zeroed value. */
+  readonly apply: (row: RowOf<F>) => Patch<F> | null;
 }
 
 export interface StatDef<F extends readonly FieldDef[]> {
@@ -134,8 +146,9 @@ export interface ActionDef<F extends readonly FieldDef[]> {
                      readonly min?: number };
   /** Ask for confirmation first. Omit for an instant action. */
   readonly confirm?: string;
-  /** Return only the fields that change. `input` is "" when there is none. */
-  readonly apply: (row: RowOf<F>, input: string) => Patch<F>;
+  /** Return only the fields that change. `input` is "" when there is none.
+   *  Return `null` to DELETE the row instead (an "eaten", a "sold and gone"). */
+  readonly apply: (row: RowOf<F>, input: string) => Patch<F> | null;
   readonly toast?: (row: RowOf<F>) => string;
   readonly tone?: "default" | "danger";
 }

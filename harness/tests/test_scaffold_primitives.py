@@ -50,7 +50,7 @@ ISO_HELPER = (
 JOURNEYS_TEST = '''import { describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 import {
-  addRecord, chooseFilter, expectRow, renderApp, row, rowTitles,
+  addRecord, chooseFilter, expectNoRow, expectRow, renderApp, row, rowTitles,
   runAction, runBulkAction, stat,
 } from "./test/helpers.js";
 
@@ -126,6 +126,50 @@ describe("an action over every record", () => {
     await runBulkAction(user, "Mark all returned");
     expect(screen.getByText("Mark all returned applied to 1 records")).toBeVisible();
     expect(row("Alpha").textContent).not.toContain("Held by Sam");
+  });
+});
+
+describe("an action that deletes", () => {
+  it("removes every record a bulk action accepts and keeps the rest", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1" });
+    await addRecord(user, { Name: "Beta", Category: "Type B", Quantity: "1" });
+    await runAction(user, "Mark held", "Alpha", "Sam");
+    await runBulkAction(user, "Remove all held");
+    expect(screen.getByText("Remove all held applied to 1 records")).toBeVisible();
+    expectNoRow("Alpha");
+    expectRow("Beta");
+    expect(stat("Records")).toBe("1");
+  });
+
+  it("removes one record when a row action returns null", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1" });
+    await addRecord(user, { Name: "Beta", Category: "Type B", Quantity: "1" });
+    await runAction(user, "Drop", "Alpha");
+    expectNoRow("Alpha");
+    expectRow("Beta");
+    expect(screen.getByText("Alpha deleted.")).toBeVisible();
+  });
+});
+
+describe("a select patch and a field filter's empty text", () => {
+  it("applies a parameter-less select patch", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1" });
+    await runAction(user, "Make C", "Alpha");
+    expectRow("Alpha", "Type C");
+  });
+
+  it("shows the field filter's own empty text when its chip matches nothing", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1" });
+    await chooseFilter(user, "Type A");
+    expect(rowTitles()).toEqual(["Alpha"]);
+    await runAction(user, "Make C", "Alpha");
+    expect(rowTitles()).toEqual([]);
+    expect(screen.getByText("Nothing matches this view")).toBeVisible();
+    expect(screen.getByText("No records of this type.")).toBeVisible();
   });
 });
 
@@ -265,12 +309,14 @@ class ScaffoldPrimitivesTest(unittest.TestCase):
             shutil.rmtree(cls._workspace)
         cls._workspace.mkdir(parents=True)
         cls.application = _seed_copy(cls._workspace)
+        _add_deleting_actions(cls.application / "src" / "app-config.ts")
         (cls.application / "src" / "journeys.test.tsx").write_text(
             JOURNEYS_TEST, encoding="utf-8"
         )
         (cls.application / "src" / "primitives.test.ts").write_text(
             PRIMITIVES_TEST, encoding="utf-8"
         )
+        cls.tsc = _run_tsc(cls.application)
         cls.report = _run_vitest(cls.application)
 
     @classmethod
@@ -284,6 +330,11 @@ class ScaffoldPrimitivesTest(unittest.TestCase):
                 results.append(assertion)
         return results
 
+    def test_the_probe_config_type_checks(self):
+        # vitest never type-checks; the harness gate does, and a select patch
+        # from a parameter-less arrow is exactly what tsc used to reject.
+        self.assertEqual(self.tsc[0], 0, self.tsc[1])
+
     def test_every_primitive_test_passes(self):
         failed = [
             "{0}: {1}".format(entry.get("fullName"), entry.get("failureMessages"))
@@ -296,7 +347,7 @@ class ScaffoldPrimitivesTest(unittest.TestCase):
         # A green report over zero tests would prove nothing; so would one that
         # skipped the suite because a helper failed to import.
         results = self._results()
-        self.assertGreaterEqual(len(results), 15)
+        self.assertGreaterEqual(len(results), 19)
         self.assertEqual(self.report.get("numPendingTests", 0), 0)
         self.assertEqual(self.report.get("numTodoTests", 0), 0)
         self.assertEqual(self.report.get("numFailedTests", 0), 0)
@@ -307,6 +358,8 @@ class ScaffoldPrimitivesTest(unittest.TestCase):
             "computed values",
             "currency rendering",
             "an action over every record",
+            "an action that deletes",
+            "a select patch and a field filter's empty text",
             "date-relative rules",
             "formatNumber",
             "dates",
@@ -315,6 +368,51 @@ class ScaffoldPrimitivesTest(unittest.TestCase):
                 any(name.startswith(expected) for name in names),
                 "no test from {0!r} ran; ran: {1}".format(expected, sorted(names)),
             )
+
+
+def _add_deleting_actions(config: pathlib.Path) -> None:
+    """Give the private copy one row action and one bulk action that delete.
+
+    The seed keeps its worked example small, so the `null` patch is exercised
+    here on a copy: a bulk "Remove all held" over `available`, and a one-click
+    "Drop" on a row. Both are the shape a clear-all or a "sold and gone" takes.
+    """
+    text = config.read_text(encoding="utf-8")
+    bulk = "  bulkActions: [\n"
+    actions = "  actions: [\n"
+    assert bulk in text and actions in text, "seed config lost its actions"
+    field_filter = '    { kind: "field", field: "category", allLabel: "All" },\n'
+    assert field_filter in text, "seed config lost its field filter"
+    text = text.replace(
+        bulk,
+        bulk + "    { id: \"dropHeld\", label: \"Remove all held\",\n"
+        "      available: (row) => row.holder !== \"\", apply: () => null },\n",
+        1,
+    ).replace(
+        actions,
+        actions + "    { id: \"drop\", label: \"Drop\", apply: () => null },\n"
+        # Parameter-less on purpose: the arrow is type-checked before `fields`
+        # is inferred, so the literal widens to `string` -- the shape that
+        # failed TS2322 in a holdout case (measured 2026-09-04).
+        "    { id: \"makeC\", label: \"Make C\", apply: () => ({ category: \"Type C\" }) },\n",
+        1,
+    ).replace(
+        field_filter,
+        '    { kind: "field", field: "category", allLabel: "All",\n'
+        '      emptyText: "No records of this type." },\n',
+        1,
+    )
+    config.write_text(text, encoding="utf-8")
+
+
+def _run_tsc(application: pathlib.Path):
+    """``tsc --noEmit`` over the copy: (exit code, output tail)."""
+    completed = subprocess.run(
+        [str(NODE_MODULES / ".bin" / "tsc"), "--noEmit", "-p", "."],
+        cwd=str(application), capture_output=True, text=True,
+        timeout=VITEST_TIMEOUT_S, check=False,
+    )
+    return completed.returncode, (completed.stdout + completed.stderr)[-3000:]
 
 
 def _run_vitest(application: pathlib.Path) -> Dict[str, object]:
