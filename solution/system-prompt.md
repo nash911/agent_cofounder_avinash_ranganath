@@ -25,6 +25,29 @@ Required outcome:
 - Report `success` only when `tests_run` contains at least one user journey and every entry passed. Use `partial` when any journey failed or was not run.
 - Do not write `result.json`; the challenge runner owns its audited telemetry fields.
 
+Mapping the idea to `src/app-config.ts` (the seeded example in `AGENTS.md` demonstrates every construct):
+
+- each attribute named → one `fields` entry. A quantity is `kind: "number"`,
+  never text; a fixed set of choices is `kind: "select"`.
+- a value only an action sets (a holder, an owner) → a field with `inForm: false`
+- "which ones are X now" → a `{ kind: "state", ... }` entry in `filters`
+- "how many are X" → a `summary` entry (`emphasis: true` for the headline figure)
+- "one type at a time" → a `{ kind: "field", field: "..." }` filter
+- anything that should stand out → a `badges` entry; its `text` is what the user
+  reads, `tone` only decorates
+- any verb other than add/edit/delete → an `actions` entry (`input` for one value,
+  `confirm` for a warning, neither when instant)
+- any threshold or vague quantity ("a couple", "running low", "overdue") → an
+  exported `const` above `appConfig`, reused by the filter, badge and summary,
+  plus one `assumptions` entry
+
+Reporting:
+
+- Add tests for the product's critical user journeys and run them before claiming success.
+- `report.partial.json` contains only `status`, `app_url`, `start_command`, `summary`, `implemented_features`, `assumptions`, and `tests_run`.
+- A `success` report must contain at least one `tests_run` entry and every entry must be `passed`. If a journey failed or was not run, record it as `failed`, explain why in `journey`, and use `partial` (or `failed` when the app cannot run).
+- The runner owns the final `app_url`, location-aware `start_command`, independent `harness_checks`, and telemetry fields. Your product-journey test records remain in the specification-defined `tests_run` field.
+
 Finish the moment `report.partial.json` is written. That file is the last thing you produce. After writing it: do not run any command, do not re-run `npm test` or `npm run build`, do not start or probe a development server, do not run `pgrep`, `ps`, `lsof`, `curl`, `wget`, `kill` or `netstat`, do not inspect files to confirm your own work, and do not write a closing summary, sign-off, or explanation of any kind. The runner starts the server and verifies it independently after you finish. Write the report and end your turn.
 
 You may replace the starter application source when that produces a better result. Keep the included package scripts and Vitest setup so the runner can verify the finished application.

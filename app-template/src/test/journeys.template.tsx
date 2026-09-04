@@ -1,11 +1,6 @@
-/**
- * JOURNEY TEST TEMPLATE — copy this file's tests into `src/journeys.test.tsx`
- * and adapt them to the idea. THAT FILE SITS ONE DIRECTORY UP, so change the
- * helper import to:  from "./test/helpers.js";
- * This file itself is NOT run: vitest only collects `*.test.*` / `*.spec.*`,
- * so the seed ships zero runnable tests on purpose. It IS typechecked, so
- * everything below is guaranteed to compile.
- */
+/** JOURNEY TEST TEMPLATE: copy these into `src/journeys.test.tsx` (one directory
+ *  up, so import helpers from "./test/helpers.js"). Not collected by vitest --
+ *  the seed ships zero runnable tests -- but typechecked, so it compiles. */
 import { describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 import {

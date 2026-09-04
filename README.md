@@ -1,21 +1,112 @@
-# AgentCofounder starter
+# AgentCofounder — a spec-driven, budget-aware build harness
 
-A forkable baseline for the AgentCofounder challenge. It gives every team the same pinned Pi runtime, neutral web application seed, execution command, telemetry collector, and public contract while leaving the actual agent strategy participant-owned.
+Solo entry (Avinash Ranganath) for the AgentCofounder challenge, Starter Repo
+track. The starter's pinned Pi runtime, runner, telemetry collector and public
+contract are kept; the agent strategy on top of them is this repository's
+contribution. Judged model: `zai-org/GLM-5.2` on Berget, thinking off.
 
-This repository installs Pi as a local dependency at exactly `@earendil-works/pi-coding-agent@0.84.1`. Do not use the floating shell installer and do not run `pi update` during the challenge.
+**In one paragraph.** A non-technical product idea goes in; a small, tested,
+accessible, persistent browser application comes out, with a report of what
+was built and which decisions were taken. The trick is to spend model tokens
+only where a model is needed. One direct call turns the idea into a precise
+specification. The application itself is a pre-built, typed scaffold that
+renders from a single configuration file, so the model writes ~60 lines of
+configuration and ~80 lines of journey tests, nothing else. The harness then
+typechecks, tests and builds the result for free, repairs from a precise brief
+when something is red, and writes the report itself. Every model call — Pi
+sessions and direct calls, retries included — is logged raw and reconciled
+against `result.json` by `npm run verify:telemetry`.
 
-## Repository boundary
+## Architecture
 
-- `solution/` is the main participant surface: change the prompt, extension, skill, or replace the runner strategy.
-- `app-template/` is the neutral application seed copied into a fresh generated workspace for every run.
-- `contract-public/` contains the replaceable public idea, domain-neutral journey guidance, and the result schema.
-- `src/` is the baseline runner and auditable result assembly.
-- `output/app/` is disposable generated application code and is reset before every run.
-- `artifacts/runs/` contains Pi JSON events, session JSONL files, stderr, and the run input.
+```
+scripts/judge.sh                       build the linux/arm64 image, run the challenge, serve the app
+└─ npm run challenge                   src/run-challenge.ts — the starter pipeline, one additive block
+   ├─ prepareOutput()                  copies app-template/ (the scaffold) into output/app, npm ci
+   ├─ python3 -m harness               the orchestrator (stdlib Python; stdout = Pi events only)
+   │   ├─ Analyst        direct json_schema call → harness/spec.json (fields, filters, badges,
+   │   │                 stats, actions, journeys, assumptions — every visible string decided once)
+   │   ├─ Architect      a pure function → harness/plan.json and the mission briefs (no model call)
+   │   ├─ Builder+Tester one Pi RPC session, one prompt, exactly two writes:
+   │   │                 src/app-config.ts then src/journeys.test.tsx (tools: read,write,edit)
+   │   ├─ observe()      tsc → vitest JSON → vite build, bounded, free
+   │   ├─ Supervisor     a deterministic policy: repair from a precise brief (cap 3, no-progress
+   │   │                 cap 2), rerun a mission that wrote nothing, build once green, done;
+   │   │                 a model Supervisor only on a stall
+   │   └─ report         harness-authored report.partial.json after every green observation
+   ├─ collectUsageFromJsonLines()      counts Pi calls AND the synthetic message_end per direct call
+   ├─ verifyGeneratedApp()             the starter's independent vitest / build / port-3000 probe
+   └─ result.json                      + telemetry_sources, direct_call_count (additive hunk)
+npm run serve                          serves output/app on 0.0.0.0:3000 for the browser judge
+```
 
-Official hidden prompts, hidden tests, model credentials, and final scoring code must remain outside participant repositories.
+Fallbacks, in order: no API key or no usable spec → the single-session path
+(the model reads the scaffold map and does everything itself, exactly the
+Phase 2 flow); no `python3` → the runner's own `runPi()` path. Both are
+measured and both produce a valid `result.json`.
 
-> **Organizer release requirement:** `contract-public/development-idea.txt` is a development placeholder. Replace it with the finalized public prompt before sharing this repository with participants. Never place hidden judging material in this file.
+### The scaffold (`app-template/`)
+
+A complete record application — form, list, filters, badges, stats, actions
+with input/confirm dialogs, delete with undo, search, sort, toasts, an error
+boundary, versioned localStorage with corrupt-data recovery, a design system
+with dark mode and 360–1280 px layouts — rendered from one typed declaration,
+`src/app-config.ts` (`defineApp({...})` with full inference of `row.<field>`
+in every predicate). `AGENTS.md` is the scaffold map: it embeds the seed
+configuration and the journey-test template verbatim, so no mission ever
+reads a file. The seed ships zero runnable tests on purpose; the generated
+`src/journeys.test.tsx` uses `src/test/helpers.tsx` (queries by accessible
+name only). Nothing in the scaffold names a domain.
+
+### The seam
+
+`src/run-challenge.ts` keeps the starter pipeline and adds one block:
+`--agent python|pi` (default `python`), an interpreter resolver, and
+`runHarness()` which spawns `python3 -m harness --idea-file … --session-root …
+--cwd … --timeout-ms … --repo-root … --thinking off` with a timeout strictly
+inside the runner's own, pipes the harness's stdout straight into
+`events.jsonl`, and closes Pi sessions by stdin EOF (Pi's SIGTERM path skips
+its stdout flush). `git diff baseline-starter -- src/ test/ contract-public/`
+is additive only. The guarded starter files (`usage.ts`, `result.ts`,
+`verify-app.ts`, `prepare-output.ts`, `port-owner.ts`, `process-tree.ts`,
+`validate-result.ts`, `test/`, `contract-public/`) are untouched.
+
+### Session strategy, measured
+
+Three transports for the Builder and Tester missions exist behind
+`HARNESS_SESSION_MODE`, all with a byte-identical prompt prefix (checked by
+the prefix hash in `harness/payload.jsonl`):
+
+| Mode | What it is | Points on the public idea (same night, same model) |
+|---|---|---|
+| `per-mission` | fresh Pi session per mission, Builder ∥ Tester in parallel, staggered 1.5 s for the prefix cache | 23,806 / 21,585 / 17,570 |
+| `single` | one session, the two briefs as consecutive prompts | 14,610 / 15,011 |
+| `combined` (default) | one session with only the `write` tool, one prompt, two writes (usually in one turn); repairs in fresh read/write/edit sessions | 17,113 (read/edit still allowed) → 16,652 with a fully cold prefix, 3 calls |
+
+The parallel transport loses on points: the second session pays a partial
+prefix and its own closing turn, and the Tester gains nothing from
+independence that the specification did not already give it. The winner is
+kept as the default; the others stay one flag away.
+
+## Measured results
+
+The full tables, per-call anatomies and the reasoning are in
+`docs/measurements.md`. Points = input + 3 × output + 0.1 × cache read, on
+the public idea, GLM-5.2, status `success` unless stated:
+
+| Stage | Points | Calls | Agent phase |
+|---|---|---|---|
+| Starter baseline (2 Sept) | 79,976 | 26 | 562 s |
+| Phase 1: Python RPC seam at parity | 87k–192k (same-day controls 113k–177k; day-to-day variance is 2×) | 26–52 | 400–820 s |
+| Phase 2 step 1: `afterEach(cleanup)` in the seed | 83,074 / 94,029 | 31–33 | 385–428 s |
+| Phase 2: config-driven scaffold + prompt | 26,432 / 24,147 | 9–11 | 94–100 s |
+| Phase 3: spec → one write-only session → observe → supervisor | 16,652 (cold prefix), 14,610–17,570 across transports | 3–6 | 42–72 s |
+
+Holdout evaluation (five unseen ideas, two runs each, `python3 -m harness.eval`,
+combined mode): **9 of 10 gates passed** at 13.7k–41.8k points; the one
+failure and two expensive runs were prompt-layer bugs (an `as const`, a
+blanked select, a rule left as a string), each since fixed with an explicit
+rule and a repair hint. Full table and the fixes in `docs/measurements.md`.
 
 ## Prerequisites
 
@@ -183,7 +274,7 @@ npm run validate:result -- output/app/result.json
 
 ## Result and telemetry ownership
 
-The model writes `report.partial.json`, containing the product summary, assumptions, features, and tests. The runner writes `result.json` after parsing Pi's completed `message_end` events. This prevents the model from inventing headline token totals.
+`report.partial.json` carries the product summary, assumptions, features and tests. In missions mode the harness writes it from the Analyst's specification and the real vitest results (after every green observation, so a run killed on the deadline still leaves a valid `partial`); in the single-session fallback the model writes it and the harness only repairs a malformed `tests_run`. The runner writes `result.json` after parsing every completed `message_end` event — Pi's and the synthetic one emitted per direct call — so no participant code can invent headline token totals.
 
 The runner appends the canonical domain-neutral journey guidance from `contract-public/journeys.md` to Pi's built-in system prompt. The protected-paths extension removes only Pi's documentation-reference block, retaining its tool list and usage guidance without steering the model toward package internals. The challenge guidance prevents implied behaviors from being dropped for simplicity while explicitly rejecting unrelated substitute features; the input idea remains authoritative.
 
@@ -197,18 +288,29 @@ The raw event stream and Pi session files are retained for audit. Official judgi
 
 `reasoning_tokens` and `cost_total` are included as additional audit fields. No efficiency score is calculated here because the public specification must first define the cache-write weighting and whether ranking uses the custom token formula or Pi's monetary cost.
 
-## Develop the harness
+## Develop
 
-The starter deliberately makes one autonomous Pi invocation. Possible participant improvements include:
+```bash
+npm run check                                   # typecheck, runner tests, scaffold tests + build
+python3 -m unittest discover -s harness/tests -t . -p 'test_*.py'   # the harness suite (fake Pi, fake gateway; no tokens)
+npm run check:runtime                           # what the image must satisfy (python3.10 floor, Pi 0.84.1, models.json)
+npm run verify:telemetry -- artifacts/runs/<id> result.json         # per-invocation files must sum to call_log
+npm run submission -- <run id>                  # copy a reference run into submission/
+python3 -m harness.eval --cases <abs dir outside the repo> --repeats 2 \
+  --output-root <abs dir> --report-dir <abs dir> [--baseline <eval-*.json>]   # holdout sweep
+```
 
-- a shorter or more reliable prompt;
-- specialized extensions or tools;
-- reusable but domain-neutral application primitives;
-- test-and-repair orchestration;
-- deliberate prompt caching;
-- a different Pi integration through its SDK or RPC mode.
+Harness flags (all optional): `HARNESS_MODE=missions|single`,
+`HARNESS_SESSION_MODE=combined|single|per-mission`, `HARNESS_REVIEWER=1`,
+`HARNESS_COVERAGE_REPAIR=1`, `HARNESS_DIRECT=0` (no direct calls),
+`HARNESS_PI_AUTO_RETRY=0`. Test-only knobs (`HARNESS_PI_BIN`,
+`HARNESS_GATEWAY_URL`, `HARNESS_FAULT=tsc`, `FAKE_PI_*`) are documented in
+`harness/tests/fake_pi.py` and never set in a judged run.
 
-Do not add a challenge idea's domain vocabulary or expected records to reusable code. The official judging idea will be different.
+Do not add a challenge idea's domain vocabulary or expected records to
+reusable code: the scaffold, the prompts and the harness are domain-neutral
+by construction (the seed configuration is a deliberately abstract "Record
+Tracker"), and the holdout ideas live outside the repository.
 
 ## Security
 
