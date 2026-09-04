@@ -1,0 +1,136 @@
+{
+  "decisions": [
+    {
+      "n": 1,
+      "action": "repair",
+      "role": "repairer",
+      "source": "policy",
+      "rationale": "tsc is red",
+      "hint": "TypeScript errors from `tsc --noEmit`, fix exactly these:\nsrc/journeys.test.tsx(49,12): error TS2304: Cannot find name 'row'.",
+      "signature": "33df6a59a87454eb7fdf618b923f9595b5f6d72cc123237a1c037496a9f0f656",
+      "mission": {
+        "role": "repairer",
+        "label": "2-repairer",
+        "settled": true,
+        "success": true,
+        "interrupted": false,
+        "timed_out": false,
+        "error": null,
+        "stop_reason": "stop",
+        "output_tokens": 152,
+        "wall_s": 11.871,
+        "resume_attempts": 0,
+        "skipped_reason": null
+      }
+    },
+    {
+      "n": 2,
+      "action": "build",
+      "role": "",
+      "source": "policy",
+      "rationale": "green; production build not run yet",
+      "hint": "",
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "mission": null
+    },
+    {
+      "n": 3,
+      "action": "done",
+      "role": "",
+      "source": "policy",
+      "rationale": "green and the production build passed",
+      "hint": "",
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "mission": null
+    }
+  ],
+  "observations": [
+    {
+      "n": 1,
+      "signature": "33df6a59a87454eb7fdf618b923f9595b5f6d72cc123237a1c037496a9f0f656",
+      "green": false,
+      "tsc_ok": false,
+      "tsc_errors": [
+        "src/journeys.test.tsx(49,12): error TS2304: Cannot find name 'row'."
+      ],
+      "vitest": {
+        "green": false,
+        "passed": 0,
+        "failed": 0,
+        "failures": []
+      },
+      "build_ran": false,
+      "build_ok": null,
+      "over_limit": [],
+      "coverage_missing": [
+        "adds a book and shows it in the list",
+        "rejects an empty required field",
+        "edits an existing book",
+        "deletes a book added by mistake",
+        "lends a book and shows the borrower",
+        "returns a book and clears the borrower",
+        "filters to books currently lent out",
+        "filters books by category",
+        "shows how many books are lent out",
+        "preserves data across a browser refresh"
+      ],
+      "elapsed_s": 1.106
+    },
+    {
+      "n": 2,
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "green": true,
+      "tsc_ok": true,
+      "tsc_errors": [],
+      "vitest": {
+        "green": true,
+        "passed": 10,
+        "failed": 0,
+        "failures": []
+      },
+      "build_ran": false,
+      "build_ok": null,
+      "over_limit": [],
+      "coverage_missing": [],
+      "elapsed_s": 3.512
+    },
+    {
+      "n": 3,
+      "signature": "c1309fb13e6e92d3cdec51fb962d89ab5f88beb76a17f70277d2306f60f7f8d3",
+      "green": true,
+      "tsc_ok": true,
+      "tsc_errors": [],
+      "vitest": {
+        "green": true,
+        "passed": 10,
+        "failed": 0,
+        "failures": []
+      },
+      "build_ran": true,
+      "build_ok": true,
+      "over_limit": [],
+      "coverage_missing": [],
+      "elapsed_s": 4.014
+    }
+  ],
+  "repairs": 1,
+  "repair_cap": 3,
+  "reruns": {
+    "builder": 0,
+    "tester": 0
+  },
+  "no_progress": 0,
+  "no_progress_cap": 2,
+  "builds": 1,
+  "tsc_skipped": 0,
+  "model_calls": 0,
+  "model_thinking_calls": 0,
+  "coverage_repair": false,
+  "review": {
+    "enabled": false,
+    "ran": false,
+    "findings": []
+  },
+  "final_action": "done",
+  "final_rationale": "green and the production build passed"
+}

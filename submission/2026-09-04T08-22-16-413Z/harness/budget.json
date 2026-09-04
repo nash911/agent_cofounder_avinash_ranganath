@@ -1,0 +1,22 @@
+{
+  "elapsed_s": 140.774,
+  "cumulative_output": 1664,
+  "peak_output": 1664,
+  "tokens_per_s": 22.966,
+  "predictions": [
+    {
+      "label": "1-combined",
+      "predicted_output": 3300,
+      "predicted_s": 110.0,
+      "actual_output": 1512,
+      "actual_s": 60.591
+    },
+    {
+      "label": "2-repairer",
+      "predicted_output": 1200,
+      "predicted_s": 48.085,
+      "actual_output": 152,
+      "actual_s": 11.871
+    }
+  ]
+}

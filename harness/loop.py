@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from .budget import BudgetController
-from .log import log, warn
+from .log import log, narrate, warn
 from .missions import (
     PREDICTED_OUTPUT_TOKENS,
     REPAIRER_PREDICTED_OUTPUT_TOKENS,
@@ -221,6 +221,7 @@ def run_missions(context: RunContext) -> bool:
             mode, len(plan.get("tests") or []), runner.thinking
         ),
     )
+    narrate("Writing the app and its tests…")
 
     observation: Optional[Observation] = None
     try:
@@ -242,6 +243,7 @@ def run_missions(context: RunContext) -> bool:
         context.restore_signals()
 
     _write_final_report(context, spec, plan, observation)
+    narrate(outcome_narration(context.signalled, observation))
     _write_json(harness_dir / "supervisor.json", supervisor.summary())
     _write_json(
         harness_dir / "missions.json",
@@ -337,6 +339,10 @@ def _supervise(
             _write_report(context, spec, plan, observation, final_status(observation))
 
         decision = supervisor.decide(observation)
+        # After the decision, not before it: what the round *means* to a viewer
+        # is the finding plus what happens next, and the repair attempt number
+        # only exists once the Supervisor has issued the repair.
+        narrate(round_narration(observation, decision, supervisor))
         if decision.action in ("done", "stop"):
             break
         if decision.action == "build":
@@ -408,6 +414,98 @@ def _repair_mission(
         )
     warn("missions · unknown decision action {0!r}; stopping".format(decision.action))
     return None
+
+
+# -- the narration ----------------------------------------------------------
+#
+# Plain English for the demo recording, composed only from data the loop
+# already holds (the Observation, the Decision, the Supervisor's counters). No
+# model call, no extra I/O, no state of its own: these are pure functions whose
+# only effect is the one stderr line ``narrate`` writes.
+
+
+def _vitest_counts(observation: Optional[Observation]) -> Dict[str, int]:
+    vitest = observation.vitest if observation is not None and isinstance(observation.vitest, dict) else {}
+    return {
+        "total": int(vitest.get("total") or 0),
+        "failed": int(vitest.get("failed") or 0),
+    }
+
+
+def _finding(observation: Optional[Observation]) -> str:
+    """What this round found, in the words a non-technical viewer would use."""
+    if observation is None:
+        return "Nothing could be checked"
+    if observation.tsc_ran and not observation.tsc_ok:
+        return "The code does not typecheck"
+    counts = _vitest_counts(observation)
+    if counts["failed"]:
+        return "{0} of {1} tests {2}".format(
+            counts["failed"], counts["total"], "fails" if counts["failed"] == 1 else "fail"
+        )
+    if observation.build_ran and observation.build_ok is False:
+        return "The production build failed"
+    if observation.build_ran and observation.build_ok:
+        return "Production build passed"
+    if observation.green and counts["total"]:
+        return "All {0} tests pass".format(counts["total"]) if counts["total"] != 1 else "The one test passes"
+    return "The tests did not run"
+
+
+def _next_step(decision: Any, supervisor: Supervisor) -> str:
+    """What the run does about it, appended to the finding."""
+    action = getattr(decision, "action", "")
+    if action == "repair":
+        # ``repairs`` was incremented when the decision was issued, so it is
+        # this repair's own 1-based attempt number -- the same number the
+        # Repairer's brief carries.
+        return " — repairing (attempt {0} of {1})".format(
+            max(1, supervisor.repairs), supervisor.repair_cap
+        )
+    if action == "rerun":
+        return " — asking the {0} to write it again".format(getattr(decision, "role", "") or "model")
+    if action == "build":
+        return " — trying a production build next"
+    return ""
+
+
+def round_narration(
+    observation: Optional[Observation], decision: Any, supervisor: Supervisor
+) -> str:
+    """One line for one observe round: what was found, and what happens next."""
+    return _finding(observation) + _next_step(decision, supervisor)
+
+
+def _stop_reason(observation: Optional[Observation]) -> str:
+    """Why a run that is not a clean success stops, without the jargon."""
+    if observation is None:
+        return "nothing could be checked"
+    if observation.tsc_ran and not observation.tsc_ok:
+        return "the code still does not typecheck"
+    counts = _vitest_counts(observation)
+    if counts["failed"]:
+        return "{0} of {1} tests still {2}".format(
+            counts["failed"], counts["total"], "fails" if counts["failed"] == 1 else "fail"
+        )
+    if observation.build_ran and observation.build_ok is False:
+        return "the production build failed"
+    if not counts["total"]:
+        return "no tests ran"
+    if not observation.build_ran:
+        return "the production build was never checked"
+    if ((observation.coverage or {}).get("missing") or []):
+        return "some journeys have no test"
+    return "the app is not finished"
+
+
+def outcome_narration(signalled: List[str], observation: Optional[Observation]) -> str:
+    """The last narration line of a missions run: how it ended, in plain words."""
+    if signalled:
+        return "Stopping: the run was told to shut down — no final report"
+    status = final_status(observation)
+    if status == "success":
+        return "Done: the app builds and every test passes — report written"
+    return "Stopping: {0} — report written as {1}".format(_stop_reason(observation), status)
 
 
 # -- the report -------------------------------------------------------------

@@ -96,23 +96,40 @@ the public idea, GLM-5.2, status `success` unless stated:
 
 | Stage | Points | Calls | Agent phase |
 |---|---|---|---|
-| Starter baseline (2 Sept) | 79,976 | 26 | 562 s |
-| Phase 1: Python RPC seam at parity | 87k–192k (same-day controls 113k–177k; day-to-day variance is 2×) | 26–52 | 400–820 s |
+| Starter baseline (2 Sept) | 79,976 | 26 | 562 s (wall) |
+| Phase 1: Python RPC seam at parity | 87k–192k (same-day controls 113k–177k; day-to-day variance is 2×) | 33–55 | 571–842 s |
 | Phase 2 step 1: `afterEach(cleanup)` in the seed | 83,074 / 94,029 | 31–33 | 385–428 s |
 | Phase 2: config-driven scaffold + prompt | 26,432 / 24,147 | 9–11 | 94–100 s |
 | Phase 3: spec → one write-only session → observe → supervisor | 16,652 (cold prefix), 14,610–17,570 across transports | 3–6 | 42–72 s |
 
 Holdout evaluation (five unseen ideas, two runs each, `python3 -m harness.eval`,
-combined mode): **9 of 10 gates passed** at 13.7k–41.8k points; the one
-failure and two expensive runs were prompt-layer bugs (an `as const`, a
-blanked select, a rule left as a string), each since fixed with an explicit
-rule and a repair hint. Full table and the fixes in `docs/measurements.md`.
+combined mode) first ran at **9 of 10 gates** and 13.7k–41.8k points. The one
+gate failure and the two expensive runs were prompt- and policy-layer bugs: an
+`as const` that broke `defineApp`'s inference, an empty-required test aimed at a
+select, a predicate rule left as a string, and a Supervisor cap that discarded a
+green observation. With those four fixes in place **every re-run case passes the
+gate**, and the worst case — jobhunt, the original failure — is 3 of 3
+(`docs/measurements.md`, "Phase 4 fixes verified"). Post-fix holdout cost is
+13k–86k points depending on how many repair rounds a draw needs, every run
+inside the 900 s budget.
 
 The same holdout set on the smaller, faster `Qwen/Qwen3.8-27B-FP8` passes
 3 of 5 gates in combined mode with every run inside the 900 s budget, showing the
 harness is not overfit to one model. That sweep also surfaced and fixed a real
-robustness hole — an uncapped repair on a non-caching model could run away — now
-bounded by a per-mission wall cap.
+robustness hole: one uncapped repair mission on a non-caching model ran 719 s on
+1.76M uncached input tokens (1,817,939 points, 984 s, over budget) before
+role-aware per-mission wall caps — combined 360 s, builder/tester 300 s,
+repairer 180 s, each clamped by the remaining budget — bounded it; the re-sweep
+with the cap in place ran 169–474 s per case.
+
+Fault injection (`harness/tests/`, deterministic, no tokens): four scenarios —
+a write truncated by `max_tokens`, an unwritable report destination, a malformed
+analyst spec, and port 3000 already occupied — each pinning that the run
+degrades to a valid `partial`/`failed` with a written report instead of crashing
+or fabricating a `success`. One real run against GLM-5.2 with a dev
+`maxTokens: 256` confirmed it end to end: `partial`, exit 0, report written,
+720 s, with both the 360 s mission wall cap and the 18,000-token output ceiling
+firing (`docs/measurements.md`, Phase 5; config under `artifacts/phase5/`).
 
 ## Prerequisites
 
@@ -168,6 +185,10 @@ place of the repository's default. Run `scripts/judge.sh --help` for the full
 flag reference, including the host-uid-1000 assumption behind the bind mounts
 and the `chown` fallback if your host user differs.
 
+A stage-by-stage runbook for a screen recording — the terminal narration with
+expected timings, the browser walkthrough of the generated app, and the
+evidence commands — is `docs/DEMO.md`.
+
 ### The equivalent manual Docker commands
 
 Omit `--env-file .env` below if you have not created a local `.env` (see `.env.example`).
@@ -215,6 +236,8 @@ or, without a local Node install, `docker run --rm -p 3000:3000 -v "$PWD/output:
 | `HARNESS_DIRECT` | Set `0` to disable the direct-gateway Analyst seed call; it never blocks the Pi session on failure either way (default `1`). |
 | `HARNESS_PYTHON` | Explicit Python interpreter for the `--agent python` orchestrator; falls back to `python3` on `PATH`, then `runPi` (default unset). |
 | `HARNESS_THINKING_GUARD` | Set `0` to disable `solution/extensions/thinking-guard.ts`, which adds an explicit `enable_thinking:false` to the outgoing payload when nothing else on the wire already disables thinking (default `1`). |
+| `CHALLENGE_AGENT` | Orchestrator that drives Pi, `python` (default) or `pi` (the unmodified starter path); same as `--agent`. |
+| `PI_CODING_AGENT_DIR` | Pi's configuration directory. Baked into the image as `/challenge/.pi-agent` by the `Dockerfile`; harness code never sets it. Leave it unset on the host (and commented out in `.env`) or it overrides the image's own provider/model configuration. |
 
 Never commit credentials. `.env.example` documents every variable name above;
 `scripts/entrypoint.sh` and `scripts/judge.sh` read `.env` only through Docker's
@@ -305,6 +328,10 @@ npm run submission -- <run id>                  # copy a reference run into subm
 python3 -m harness.eval --cases <abs dir outside the repo> --repeats 2 \
   --output-root <abs dir> --report-dir <abs dir> [--baseline <eval-*.json>]   # holdout sweep
 ```
+
+The harness suite is 455+ tests as of Phase 5 and runs entirely against a fake
+Pi and a fake gateway, so it spends no tokens; the count for a given phase is in
+`docs/measurements.md`.
 
 Harness flags (all optional): `HARNESS_MODE=missions|single`,
 `HARNESS_SESSION_MODE=combined|single|per-mission`, `HARNESS_REVIEWER=1`,

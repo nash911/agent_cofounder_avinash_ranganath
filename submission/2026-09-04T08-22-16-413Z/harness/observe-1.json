@@ -1,0 +1,50 @@
+{
+  "tsc_ran": true,
+  "tsc_ok": false,
+  "tsc_errors": [
+    "src/journeys.test.tsx(49,12): error TS2304: Cannot find name 'row'."
+  ],
+  "vitest": {
+    "green": false,
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "names": [],
+    "failures": []
+  },
+  "build_ran": false,
+  "build_ok": null,
+  "build_tail": "",
+  "files": {
+    "src/app-config.ts": {
+      "exists": true,
+      "lines": 50,
+      "changed_from_seed": true
+    },
+    "src/journeys.test.tsx": {
+      "exists": true,
+      "lines": 84,
+      "changed_from_seed": true
+    }
+  },
+  "over_limit": [],
+  "coverage": {
+    "missing": [
+      "adds a book and shows it in the list",
+      "rejects an empty required field",
+      "edits an existing book",
+      "deletes a book added by mistake",
+      "lends a book and shows the borrower",
+      "returns a book and clears the borrower",
+      "filters to books currently lent out",
+      "filters books by category",
+      "shows how many books are lent out",
+      "preserves data across a browser refresh"
+    ],
+    "matched": 0,
+    "total": 10
+  },
+  "signature": "33df6a59a87454eb7fdf618b923f9595b5f6d72cc123237a1c037496a9f0f656",
+  "green": false,
+  "elapsed_s": 1.106
+}

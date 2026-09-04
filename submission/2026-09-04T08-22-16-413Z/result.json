@@ -1,0 +1,186 @@
+{
+  "status": "success",
+  "app_url": "http://localhost:3000",
+  "start_command": "npm --prefix 'output/app' run dev",
+  "summary": "A single-record-type browser app for cataloguing books at home. Each book has a title, author, and category. You can mark a book as lent to someone and clear that when it comes back. The list shows everything you own, with a filter for books currently out and a count of how many are lent.",
+  "implemented_features": [
+    "Adds a book and shows it in the list",
+    "Rejects an empty required field",
+    "Edits an existing book",
+    "Deletes a book added by mistake",
+    "Lends a book and shows the borrower",
+    "Returns a book and clears the borrower",
+    "Filters to books currently lent out",
+    "Filters books by category",
+    "Shows how many books are lent out",
+    "Preserves data across a browser refresh"
+  ],
+  "assumptions": [
+    "The category select is limited to Novel, Cookbook, and Reference as the examples given.",
+    "The 'Lend' action prompts for a borrower name and stores it in the Borrower field.",
+    "The 'Return' action clears the Borrower field.",
+    "Omitted multi-user or shared access: The idea states it is just the user on their own computer.",
+    "Omitted due dates or return deadlines: The idea only mentions noting the borrower and clearing it on return.",
+    "Search and alphabetical sorting are provided by the scaffold and are always available."
+  ],
+  "tests_run": [
+    {
+      "command": "npm test",
+      "journey": "journeys adds a book and shows it in the list",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys rejects an empty required field",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys edits an existing book",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys deletes a book added by mistake",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys lends a book and shows the borrower",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys returns a book and clears the borrower",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys filters to books currently lent out",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys filters books by category",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys shows how many books are lent out",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "journey": "journeys preserves data across a browser refresh",
+      "result": "passed"
+    }
+  ],
+  "harness_checks": [
+    {
+      "command": "output/app/node_modules/.bin/vitest run --reporter=json --outputFile=artifacts/runs/2026-09-04T08-22-16-413Z/app-test-results.json --passWithNoTests=false",
+      "journey": "The generated app's Vitest report contained at least one completed test and no failed, skipped, or todo tests",
+      "result": "passed"
+    },
+    {
+      "command": "npm run build",
+      "journey": "The generated app completed a production build",
+      "result": "passed"
+    },
+    {
+      "command": "npm run dev",
+      "journey": "The generated app started its own HTTP server on port 3000 and shut down cleanly",
+      "result": "passed"
+    }
+  ],
+  "model_calls": 6,
+  "input_tokens": 4621,
+  "output_tokens": 3232,
+  "cache_read_tokens": 28608,
+  "cache_write_tokens": 0,
+  "total_tokens": 36461,
+  "reasoning_tokens": 0,
+  "cost_total": 0.0607414,
+  "call_log": [
+    {
+      "index": 1,
+      "model": "berget/zai-org/GLM-5.2",
+      "input_tokens": 56,
+      "output_tokens": 1568,
+      "cache_read_tokens": 576,
+      "cache_write_tokens": 0,
+      "total_tokens": 2200,
+      "reasoning_tokens": 0,
+      "cost_total": 0.007784
+    },
+    {
+      "index": 2,
+      "model": "berget/zai-org/GLM-5.2",
+      "input_tokens": 2556,
+      "output_tokens": 1507,
+      "cache_read_tokens": 3904,
+      "cache_write_tokens": 0,
+      "total_tokens": 7967,
+      "reasoning_tokens": 0,
+      "cost_total": 0.0156748
+    },
+    {
+      "index": 3,
+      "model": "berget/zai-org/GLM-5.2",
+      "input_tokens": 64,
+      "output_tokens": 5,
+      "cache_read_tokens": 7936,
+      "cache_write_tokens": 0,
+      "total_tokens": 8005,
+      "reasoning_tokens": 0,
+      "cost_total": 0.011222
+    },
+    {
+      "index": 4,
+      "model": "berget/zai-org/GLM-5.2",
+      "input_tokens": 957,
+      "output_tokens": 16,
+      "cache_read_tokens": 4416,
+      "cache_write_tokens": 0,
+      "total_tokens": 5389,
+      "reasoning_tokens": 0,
+      "cost_total": 0.0075926
+    },
+    {
+      "index": 5,
+      "model": "berget/zai-org/GLM-5.2",
+      "input_tokens": 929,
+      "output_tokens": 133,
+      "cache_read_tokens": 5376,
+      "cache_write_tokens": 0,
+      "total_tokens": 6438,
+      "reasoning_tokens": 0,
+      "cost_total": 0.009412199999999999
+    },
+    {
+      "index": 6,
+      "model": "berget/zai-org/GLM-5.2",
+      "input_tokens": 59,
+      "output_tokens": 3,
+      "cache_read_tokens": 6400,
+      "cache_write_tokens": 0,
+      "total_tokens": 6462,
+      "reasoning_tokens": 0,
+      "cost_total": 0.0090558
+    }
+  ],
+  "pi_exit_code": 0,
+  "telemetry_source": "pi-json-event-stream",
+  "port_reclamation": {
+    "preexisting_listener": false,
+    "listener_after_pi": false,
+    "attempted": false,
+    "reclaimed": false,
+    "process_ids": [],
+    "diagnostic": "Port 3000 remained free after Pi"
+  },
+  "telemetry_sources": [
+    "pi-json-event-stream",
+    "direct-gateway"
+  ],
+  "direct_call_count": 1
+}

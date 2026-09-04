@@ -47,7 +47,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .budget import BudgetController
-from .log import close_file_sink, error as log_error, log, set_file_sink, warn
+from .log import close_file_sink, error as log_error, log, narrate, set_file_sink, warn
 from .loop import RunContext, report_spec, run_missions
 from .pirpc import PiRpc, PiRpcError, PiRpcInterrupted, base_args, pi_env
 from .plan import derive_plan
@@ -415,6 +415,53 @@ def resolve_mode(spec: Optional[Dict[str, Any]]) -> Tuple[str, str]:
     return "missions", "spec with {0} journey(s)".format(len(spec.get("journeys") or []))
 
 
+# -- the narration (demo surface) -------------------------------------------
+#
+# Plain English for whoever is watching this process's stderr in the demo
+# recording. Pure functions over data the run already holds: no model call, no
+# extra I/O, and nothing here may change an exit code, the report or stdout.
+
+
+def _count(number: int, noun: str) -> str:
+    """``"1 field"`` / ``"6 fields"`` -- the narration says numbers out loud."""
+    return "{0} {1}".format(number, noun if number == 1 else noun + "s")
+
+
+def spec_narration(spec: Dict[str, Any]) -> str:
+    """What the Analyst understood, from the spec the run already has."""
+    return "Understood the product: {0}, {1}".format(
+        _count(len(spec.get("fields") or []), "field"),
+        _count(len(spec.get("journeys") or []), "user journey"),
+    )
+
+
+def single_finish_narration(
+    observation: Optional[Dict[str, Any]], signalled: bool
+) -> str:
+    """How the single session ended, in plain words.
+
+    ``observation`` is the shutdown observation (``ReportWatcher.final_observe``)
+    when one was taken, and ``None`` when it was not -- either because a signal
+    is in flight (no time for it) or because the model wrote its own report and
+    the harness left it alone.
+    """
+    if signalled:
+        return "Stopping: the run was told to shut down — no final check"
+    if observation is None:
+        return "Done: the app and its report are written"
+    total = int(observation.get("total") or 0)
+    failed = int(observation.get("failed") or 0)
+    if observation.get("green") and total:
+        if total == 1:
+            return "Done: the one test passes — report written"
+        return "Done: all {0} tests pass — report written".format(total)
+    if failed:
+        return "Stopping: {0} of {1} tests still {2}".format(
+            failed, total, "fails" if failed == 1 else "fail"
+        )
+    return "Stopping: no tests ran"
+
+
 #: How many unmatched ``agent_start`` timestamps are remembered. Two missions
 #: run at once; anything beyond this is a turn whose ``message_end`` never
 #: arrived (a timeout), and an unbounded memory of those would slowly shift
@@ -538,6 +585,9 @@ def run(args: argparse.Namespace) -> int:
     config = _validate(args)
     harness_directory: pathlib.Path = config["harness_directory"]
     set_file_sink(harness_directory / "harness.log")
+    # The demo recording's first line: the run has an idea and is about to
+    # start. Everything the narration says afterwards is a stage boundary.
+    narrate("Reading the product idea…")
 
     repository_root: pathlib.Path = config["repository_root"]
     app_directory: pathlib.Path = config["app_directory"]
@@ -606,6 +656,8 @@ def run(args: argparse.Namespace) -> int:
             journeys_md=read_journeys(repository_root),
         )
         log("harness", "analyst · {0}".format("spec produced" if spec else "no spec (continuing without one)"))
+        if spec:
+            narrate(spec_narration(spec))
 
     context = RunContext(
         args=args,
@@ -631,6 +683,10 @@ def run(args: argparse.Namespace) -> int:
 
     mode, reason = resolve_mode(spec)
     log("harness", "mode · {0} ({1})".format(mode, reason))
+    if mode == "single" and not spec:
+        # The only fallback a viewer needs explained: no spec means no missions,
+        # so the whole app is written in one session instead.
+        narrate("Could not derive a spec — building in one session instead")
     try:
         if mode == "missions":
             # Missions mode has no ReportWatcher: no mission has a `bash` tool,
@@ -716,6 +772,7 @@ def run_single_session(context: RunContext) -> int:
             SESSION_LABEL, context.thinking, args.timeout_ms / 1000.0, app_directory
         ),
     )
+    narrate("Writing the whole app and its tests in one session…")
 
     if context.gate_active:
         refusal = budget_gate_reason(controller, BUILDER_PREDICTED_OUTPUT_TOKENS)
@@ -828,15 +885,16 @@ def run_single_session(context: RunContext) -> int:
     # so a real OS signal skips this step outright rather than risking it.
     report_path = app_directory / "report.partial.json"
     needs_final_report = bool(result.get("interrupted")) or bool(result.get("timed_out")) or not report_path.is_file()
+    final_observation: Optional[Dict[str, Any]] = None
     if context.signalled:
         log("report", "final observe skipped (signal received); shutdown must stay fast")
     elif needs_final_report:
-        observation = report_watcher.final_observe()
+        final_observation = report_watcher.final_observe()
         log(
             "report",
             "final observe · green={0} total={1} passed={2} failed={3}".format(
-                observation.get("green"), observation.get("total"),
-                observation.get("passed"), observation.get("failed"),
+                final_observation.get("green"), final_observation.get("total"),
+                final_observation.get("passed"), final_observation.get("failed"),
             ),
         )
     else:
@@ -849,6 +907,7 @@ def run_single_session(context: RunContext) -> int:
         if repaired is not None:
             log("report", "repaired tests_run from vitest ({0} entries); model prose kept".format(repaired))
 
+    narrate(single_finish_narration(final_observation, bool(context.signalled)))
     return finalize(harness_directory, controller, bool(result.get("success")))
 
 
