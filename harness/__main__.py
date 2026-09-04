@@ -303,6 +303,23 @@ def resolve_credentials() -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 
+def resolve_provider_model(args: argparse.Namespace) -> Tuple[str, str]:
+    """``(provider, model)`` for the whole run -- the one place that decides.
+
+    Precedence, identical at every call site: the CLI flag the runner passed,
+    then the matching ``CHALLENGE_*`` variable the organizers set, then the
+    contract default. Resolved once in :func:`run` and carried on the
+    ``RunContext`` so the direct client, every mission session and the
+    single-session fallback all name the same model, and so ``--provider`` and
+    ``--model`` are *always* on the Pi command line -- an unset pair used to
+    leave Pi to pick the first model of the first configured provider, which is
+    the right one only by list order.
+    """
+    provider = args.provider or os.environ.get("CHALLENGE_PROVIDER") or DEFAULT_DIRECT_PROVIDER
+    model = args.model or os.environ.get("CHALLENGE_MODEL") or DEFAULT_DIRECT_MODEL
+    return provider, model
+
+
 def build_direct_client(
     harness_directory: pathlib.Path,
     api_key: str,
@@ -313,18 +330,19 @@ def build_direct_client(
 
     Built once and shared by the Analyst, the model Supervisor and the Reviewer
     so all three appear as one client in the usage log and against one cost
-    table. Model/provider follow the same precedence as the rest of the
-    harness: the CLI flag, then the matching ``CHALLENGE_*`` env var, then the
-    contract default.
+    table. Model/provider come from :func:`resolve_provider_model`, the same
+    resolution the Pi sessions get, so the direct calls and the missions can
+    never disagree about which model this run is.
     """
     if _gateway is None:
         return None
     try:
+        provider, model = resolve_provider_model(args)
         return _gateway.GatewayClient(
             base_url=os.environ.get("HARNESS_GATEWAY_URL", DEFAULT_GATEWAY_URL),
             api_key=api_key,
-            model=args.model or os.environ.get("CHALLENGE_MODEL") or DEFAULT_DIRECT_MODEL,
-            provider=args.provider or os.environ.get("CHALLENGE_PROVIDER") or DEFAULT_DIRECT_PROVIDER,
+            model=model,
+            provider=provider,
             harness_dir=harness_directory,
             stop_event=stop_event,
         )
@@ -616,6 +634,11 @@ def run(args: argparse.Namespace) -> int:
             except (OSError, ValueError):
                 pass
 
+    # The run's one provider/model decision, made before anything can spend a
+    # token so the direct client and every Pi session name the same model.
+    provider, model = resolve_provider_model(args)
+    log("harness", "model · {0} / {1}".format(provider, model))
+
     # -- credentials, budget controller, analyst (C4/C6) --------------------
     api_key, key_name = resolve_credentials()
     log("credentials", "using {0}".format(key_name) if api_key else "none found")
@@ -668,6 +691,8 @@ def run(args: argparse.Namespace) -> int:
         harness_directory=harness_directory,
         pi_binary=config["pi_binary"],
         extensions=extensions,
+        provider=provider,
+        model=model,
         child_env=child_environment(harness_directory, extensions),
         append_system=append_system,
         thinking=normalize_thinking(args.thinking),
@@ -761,8 +786,8 @@ def run_single_session(context: RunContext) -> int:
         session_dir=session_dir,
         extensions=list(context.extensions),
         skill=skill_argument,
-        provider=args.provider,
-        model=args.model,
+        provider=context.provider,
+        model=context.model,
         thinking=context.thinking,
     )
 

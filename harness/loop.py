@@ -112,6 +112,12 @@ class RunContext:
     signalled: List[str]
     controller: BudgetController
     gate_active: bool
+    #: The run's resolved provider/model (``__main__.resolve_provider_model``),
+    #: passed explicitly to every Pi session so ``--provider``/``--model`` are
+    #: always on the command line. ``run()`` always fills both in; the empty
+    #: defaults exist only so a test can build a context without them.
+    provider: str = ""
+    model: str = ""
     spec: Optional[Dict[str, Any]] = None
     client: Any = None
     restore_signals: Callable[[], None] = lambda: None
@@ -186,8 +192,8 @@ def run_missions(context: RunContext) -> bool:
             context.repository_root, context.app_directory
         ),
         extensions=list(context.extensions),
-        provider=context.args.provider,
-        model=context.args.model,
+        provider=context.provider,
+        model=context.model,
         thinking=context.thinking,
         env=dict(context.child_env),
         stop_event=context.stop_event,

@@ -7,8 +7,7 @@ temp/
 results/
 tools/
 evals/
-docs/BUILD_PLAN.md
-docs/PHASE1_READINESS.md
+docs/
 node_modules
 .npm-cache
 app-template/node_modules

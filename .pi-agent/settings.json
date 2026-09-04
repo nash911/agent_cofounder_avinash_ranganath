@@ -1,6 +1,8 @@
 {
   "quietStartup": true,
   "defaultThinkingLevel": "off",
+  "defaultProvider": "berget",
+  "defaultModel": "zai-org/GLM-5.2",
   "retry": {
     "enabled": true
   }

@@ -421,7 +421,7 @@ class Supervisor:
         # 4/5/6 -- the caps and the model escalation only apply while the app is
         # still broken. A green observation reached ON the cap-th repair must be
         # built and finished, never thrown away as `partial` (measured
-        # 2026-09-04, jobhunt: the 3rd repair turned the app green with 11/11
+        # 2026-09-04, a holdout case: the 3rd repair turned the app green with 11/11
         # tests, but the cap stopped the run before the build branch and the run
         # reported `partial`). The caps stop us starting ANOTHER repair on a
         # still-broken app; they never reject one that just went green.

@@ -10,7 +10,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -24,6 +24,13 @@ jobs:
             package-lock.json
             app-template/package-lock.json
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # 3.10 is the documented floor (solution/tools/check-runtime.ts);
+          # the judged image runs 3.12, so testing the floor is the stricter check.
+          python-version: '3.10'
+
       - name: Install harness dependencies
         run: npm ci --ignore-scripts
 
@@ -32,3 +39,6 @@ jobs:
 
       - name: Run all checks
         run: npm run check
+
+      - name: Run harness test suite
+        run: python3 -m unittest discover -s harness/tests -t . -p 'test_*.py'

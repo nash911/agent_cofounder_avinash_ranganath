@@ -99,7 +99,7 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
     lines.append("- Form labels (what `addRecord`/`editRecord` fill): {0}".format(_join(form)))
     # The empty-required journey must blank a TEXT field: `fill` selects a
     # select's value, so `""` throws "Value \"\" not found in options" before
-    # validation runs (measured 2026-09-04, carcare holdout). normalize_spec
+    # validation runs (measured 2026-09-04, a holdout case). normalize_spec
     # guarantees the title field is a required text field, so one always exists.
     req_text = next(
         (_text(f.get("label")) for f in fields

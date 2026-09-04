@@ -44,7 +44,9 @@ SERVE=0
 IDEA_FILE=""
 
 print_usage() {
-  sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # 2..36 == the header comment block (line 37 is `set -euo pipefail`); BRE
+  # `\{0,1\}` keeps the strip portable to BSD sed on the judges' macOS hosts.
+  sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -120,10 +122,14 @@ if [ -n "$IDEA_FILE" ]; then
 fi
 
 CREATE_ARGS+=("$IMAGE")
-CREATE_ARGS+=("${RUN_ARGS[@]}")
+# ${X[@]+"${X[@]}"} -- the portable "expand only if set" guard. Under `set -u`,
+# bash < 4.4 (macOS ships 3.2.57) treats "${X[@]}" on an EMPTY array as an
+# unbound variable and aborts, which is the default path here: RUN_ARGS is
+# empty unless --idea-file was given.
+CREATE_ARGS+=(${RUN_ARGS[@]+"${RUN_ARGS[@]}"})
 
 echo "judge.sh: creating container ${CONTAINER}" >&2
-docker "${CREATE_ARGS[@]}" >/dev/null
+docker ${CREATE_ARGS[@]+"${CREATE_ARGS[@]}"} >/dev/null
 
 echo "judge.sh: running (docker start -a ${CONTAINER})" >&2
 set +e
@@ -141,9 +147,11 @@ fi
 docker rm "$CONTAINER" >/dev/null
 
 if [ -f result.json ]; then
-  node -e '
+  # Summarised by the image's node reading stdin -- Docker is the only host
+  # tool this script assumes, so nothing here may need a host Node install.
+  if ! docker run --rm -i --entrypoint node "$IMAGE" -e '
     const fs = require("fs");
-    const r = JSON.parse(fs.readFileSync("result.json", "utf8"));
+    const r = JSON.parse(fs.readFileSync(0, "utf8"));
     const input = r.input_tokens ?? 0;
     const output = r.output_tokens ?? 0;
     const cacheRead = r.cache_read_tokens ?? 0;
@@ -153,7 +161,9 @@ if [ -f result.json ]; then
     console.log(`status: ${r.status}`);
     console.log(`model_calls: ${r.model_calls ?? "n/a"}`);
     console.log(`points (input + 3*output + 0.1*cache_read): ${points}`);
-  '
+  ' < result.json; then
+    echo "judge.sh: WARNING -- could not summarise result.json" >&2
+  fi
 fi
 
 if [ "$SERVE" -eq 1 ]; then

@@ -211,7 +211,7 @@ def builder_brief(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         "Shape: `import { defineApp } from \"./lib/config-types.js\";` then any exported "
         "constants, then `export const appConfig = defineApp({ ... });`. Never annotate the "
         "export (`: AppConfig` destroys inference) and never hoist `fields` into its own const.",
-        # Measured 2026-09-04 (jobhunt holdout, the only gate failure): the model
+        # Measured 2026-09-04 (a holdout case, the only gate failure): the model
         # wrote `fields: [...] as const` and tsc failed with TS2719 ("Two
         # different types with this name"); two repair rounds could not recover.
         "Never write `as const` anywhere -- not on `fields`, not on any array or object. "
@@ -220,7 +220,7 @@ def builder_brief(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         # `rule` is not a key the outline emits -- a state filter's predicate
         # arrives as `match` -- and naming a key that is not there invites the
         # Builder to write the English straight into `match:` as a string.
-        # Measured 2026-09-04 (plants holdout): the model left `match` as the
+        # Measured 2026-09-04 (a holdout case): the model left `match` as the
         # English string and tsc failed TS2322 (string not assignable to a
         # predicate). The value must be a function, never a string.
         "Every `match`/`when`/`available`/`compute`/`apply`/`text`/`toast` value shown above "
@@ -553,8 +553,8 @@ def _failure_report(observation: Dict[str, Any]) -> Tuple[List[str], str]:
         base = "{0} — the file each error names. Fix the types; do not silence them with `any` " \
                "or `@ts-ignore`.".format(_join(files) if files else "The file each error names")
         # Two tsc errors have a specific, counter-intuitive cause the model
-        # cannot infer from the message alone (measured 2026-09-04, jobhunt and
-        # plants holdouts). Name the exact fix so a repair does not loop.
+        # cannot infer from the message alone (measured 2026-09-04, on two
+        # holdout cases). Name the exact fix so a repair does not loop.
         blob = " ".join(tsc_errors)
         if "TS2719" in blob or "Two different types with this name" in blob:
             base = (

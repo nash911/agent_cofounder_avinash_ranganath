@@ -362,7 +362,7 @@ def _force_title_testable(fields: List[Dict[str, Any]], title_field: str) -> Non
     works on a `text`/`longtext` field: a `select` always holds a valid option
     (blanking one throws in testing-library before validation runs), and a
     blank `date`/`number` is a fiddlier assertion. Measured 2026-09-04
-    (carcare holdout): when the first required field was a `select` and no
+    (a holdout case): when the first required field was a `select` and no
     required text field existed, the Tester blanked the select and the run
     burned a whole repair round. The title field is always shown and is the
     natural "name": make it a required text field so a text target always
