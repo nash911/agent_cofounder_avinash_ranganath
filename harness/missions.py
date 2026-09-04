@@ -85,6 +85,21 @@ SHUTDOWN_RESERVE_S = 30.0
 #: vitest + (once) a vite build, all of which run after the last session ends.
 OBSERVE_RESERVE_S = 30.0
 
+#: Per-mission wall-clock caps. A mission handed the whole remaining budget can
+#: run away: measured 2026-09-04, a single Qwen repair looped read->edit->re-read
+#: for 719s and 1.76M uncached input tokens (1.8M points) because ``prompt_budget``
+#: returned ~720s. These caps bound a STUCK session without touching a legitimate
+#: one -- a ``write``-only combined build settles in 45-98s, a repair is one edit
+#: (5-80s). ``repairer`` is tightest because read/edit is the loop-prone role;
+#: the combined build cannot loop (it has only ``write``). ``None``/unknown role
+#: falls back to the remaining budget.
+MISSION_MAX_S = {
+    "combined": 360.0,
+    "builder": 300.0,
+    "tester": 300.0,
+    "repairer": 180.0,
+}
+
 #: Grace for the ``abort`` acknowledgement (``agent_settled`` or the response).
 ABORT_GRACE_S = 5.0
 
@@ -525,10 +540,17 @@ class MissionRunner:
 
     # -- session plumbing ----------------------------------------------------
 
-    def prompt_budget(self) -> float:
-        """Per-mission timeout: what is left after shutdown and observe reserves."""
-        remaining = self.deadline - time.monotonic() - SHUTDOWN_RESERVE_S - OBSERVE_RESERVE_S
-        return max(1.0, remaining)
+    def prompt_budget(self, role: str = "") -> float:
+        """Per-mission timeout: the smaller of what is left and the role's wall cap.
+
+        Reserves the shutdown and observe slices out of the run deadline, then
+        clamps to :data:`MISSION_MAX_S` for the role so one wedged mission (a
+        repair loop, a model that re-reads the whole scaffold) cannot consume
+        the entire budget. An unknown role is uncapped (the remaining budget).
+        """
+        remaining = max(1.0, self.deadline - time.monotonic() - SHUTDOWN_RESERVE_S - OBSERVE_RESERVE_S)
+        cap = MISSION_MAX_S.get(role)
+        return remaining if cap is None else max(1.0, min(remaining, cap))
 
     def _spawn(self, label: str, session_dir: pathlib.Path, tools: Optional[str]) -> PiRpc:
         arguments = base_args(
@@ -556,7 +578,8 @@ class MissionRunner:
         log(
             "session",
             "{0} · tools={1} · thinking={2} · budget={3:.0f}s".format(
-                label, tools or "(default)", self.thinking, self.prompt_budget()
+                label, tools or "(default)", self.thinking,
+                self.prompt_budget(label.split("-", 1)[-1] if "-" in label else label)
             ),
         )
         return client
@@ -583,7 +606,7 @@ class MissionRunner:
         index = self._begin(label, mission.predicted_output)
         try:
             outcome = client.prompt(
-                mission.brief, timeout=self.prompt_budget(), on_event=self._on_event()
+                mission.brief, timeout=self.prompt_budget(mission.role), on_event=self._on_event()
             )
         except PiRpcInterrupted:
             outcome["interrupted"] = True

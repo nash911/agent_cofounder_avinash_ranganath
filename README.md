@@ -108,6 +108,12 @@ failure and two expensive runs were prompt-layer bugs (an `as const`, a
 blanked select, a rule left as a string), each since fixed with an explicit
 rule and a repair hint. Full table and the fixes in `docs/measurements.md`.
 
+The same holdout set on the smaller, faster `Qwen/Qwen3.8-27B-FP8` passes
+3 of 5 gates in combined mode with every run inside the 900 s budget, showing the
+harness is not overfit to one model. That sweep also surfaced and fixed a real
+robustness hole — an uncapped repair on a non-caching model could run away — now
+bounded by a per-mission wall cap.
+
 ## Prerequisites
 
 - Node.js 22.19.x. The repository deliberately rejects other major versions.

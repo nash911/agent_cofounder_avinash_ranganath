@@ -24,7 +24,7 @@ import unittest
 from typing import Any, Dict, List
 from unittest import mock
 
-from harness import pirpc
+from harness import missions, pirpc
 from harness.budget import BudgetController
 from harness.missions import (
     BUILDER_PREDICTED_OUTPUT_TOKENS,
@@ -371,6 +371,53 @@ class PerMissionModeTest(MissionRunnerTestCase):
         self.assertEqual(len(entries), 2, "the resume prompt must reuse the same session")
         self.assertEqual(len({entry["pid"] for entry in entries}), 1)
         self.assertEqual(entries[1]["text"], RESUME_PROMPT)
+
+
+class MissionTimeoutCapTest(MissionRunnerTestCase):
+    """A wedged mission is cut at its role's wall cap, not the whole budget.
+
+    Regression (2026-09-04, Qwen cellar holdout): ``prompt_budget`` handed a
+    repair the entire remaining deadline, so a small model that looped
+    read->edit->re-read ran 719s and 1.76M uncached input tokens before the
+    budget floor stopped it. The cap bounds a stuck session; a healthy one is
+    unaffected because it settles far inside the cap.
+    """
+
+    def test_prompt_budget_clamps_each_role_to_its_wall_cap(self):
+        runner = self.make_runner(deadline=time.monotonic() + 5000.0)
+        # Far more budget than any cap, so the cap -- not the remainder -- wins.
+        self.assertLessEqual(runner.prompt_budget("repairer"), missions.MISSION_MAX_S["repairer"] + 0.5)
+        self.assertLessEqual(runner.prompt_budget("combined"), missions.MISSION_MAX_S["combined"] + 0.5)
+        self.assertGreater(runner.prompt_budget("repairer"), 1.0)
+        # An unknown role (single mode's "1-agent") is uncapped: it does the
+        # whole run, so it may use the remaining budget.
+        self.assertGreater(runner.prompt_budget("agent"), missions.MISSION_MAX_S["combined"])
+
+    def test_the_remaining_budget_still_wins_when_it_is_below_the_cap(self):
+        runner = self.make_runner(deadline=time.monotonic() + missions.SHUTDOWN_RESERVE_S
+                                  + missions.OBSERVE_RESERVE_S + 40.0)
+        # Only ~40s of usable budget: the repair cap (180s) must not inflate it.
+        self.assertLessEqual(runner.prompt_budget("repairer"), 41.0)
+
+    def test_a_hanging_repair_is_cut_at_its_cap_not_the_deadline(self):
+        # The fake Pi hangs (never settles, ignores stdin EOF/SIGTERM). With a
+        # generous deadline but a tiny repair cap injected, the mission must
+        # return in about the cap, not run to the deadline.
+        original = dict(missions.MISSION_MAX_S)
+        missions.MISSION_MAX_S["repairer"] = 2.0
+        try:
+            self.knobs["FAKE_PI_HANG"] = "1"
+            runner = self.make_runner(deadline=time.monotonic() + 3600.0)
+            started = time.monotonic()
+            result = runner.run(self.mission_repairer())
+            elapsed = time.monotonic() - started
+        finally:
+            missions.MISSION_MAX_S.clear()
+            missions.MISSION_MAX_S.update(original)
+            self.knobs.pop("FAKE_PI_HANG", None)
+        # Cut near the 2s cap (plus close/reap grace), never near the deadline.
+        self.assertLess(elapsed, 30.0, "the hung repair was not bounded by its cap")
+        self.assertFalse(result.settled)
 
 
 class ObservabilityTest(MissionRunnerTestCase):
