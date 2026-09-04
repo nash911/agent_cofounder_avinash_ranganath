@@ -120,6 +120,7 @@ def base_args(
     session_dir: Union[str, pathlib.Path, None] = None,
     extensions: Optional[List[Union[str, pathlib.Path]]] = None,
     skill: Union[str, pathlib.Path, None] = None,
+    tools: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     thinking: str = "off",
@@ -129,6 +130,13 @@ def base_args(
     Order matches ``src/run-challenge.ts`` so the two invocations stay comparable
     (``--mode`` is prepended by :class:`PiRpc`, and the prompt is sent over RPC
     rather than passed as a positional argument).
+
+    ``tools`` is the only addition to the starter's set: a mission session gets
+    exactly the tools its brief needs (``"read,write,edit"``), which is both a
+    guard rail -- no ``bash``, so a mission cannot spend a call running
+    ``npm test`` the harness runs for free -- and a smaller tool schema in every
+    request's prefix. ``None`` (the default, and what the ``--agent pi`` control
+    path uses) emits no flag at all, so Pi keeps its full tool set.
     """
     args: List[str] = [
         "--offline",
@@ -146,6 +154,8 @@ def base_args(
         args += ["--extension", str(extension)]
     if skill is not None:
         args += ["--skill", str(skill)]
+    if tools is not None:
+        args += ["--tools", str(tools)]
     if provider:
         args += ["--provider", provider]
     if model:
@@ -195,6 +205,11 @@ class PiRpc:
         self._n = 0
         self._eof = False
         self._closed = False
+        # A mission's worker thread and MissionRunner.close() can both reach
+        # close() for the same child during shutdown; the `_closed` check is
+        # not atomic on its own, and two concurrent wind-downs would race on
+        # stdin, the reader join and the stderr handle.
+        self._close_lock = threading.Lock()
         self.exit_code: Optional[int] = None
         self.total = Usage()
         self.timeline: List[Dict[str, Any]] = []
@@ -509,7 +524,14 @@ class PiRpc:
 
         Closing stdin first is deliberate -- Pi flushes its stdout on stdin EOF
         but **not** on SIGTERM.
+
+        Serialised: a second caller waits for the first wind-down (bounded by
+        the three graces) and then sees the exit code, instead of racing it.
         """
+        with self._close_lock:
+            return self._close(stdin_grace, term_grace, kill_grace)
+
+    def _close(self, stdin_grace: float, term_grace: float, kill_grace: float) -> Optional[int]:
         if self._closed:
             return self.exit_code
         try:

@@ -40,9 +40,13 @@ def harness_environment(extra: Optional[Dict[str, str]] = None) -> Dict[str, str
     for name in ("FAKE_PI_HANG", "FAKE_PI_SLOW", "FAKE_PI_ERROR", "FAKE_PI_ERROR_ONCE",
                  "FAKE_PI_LINES", "FAKE_PI_GARBAGE", "FAKE_PI_WRITE_REPORT", "FAKE_PI_COMPACT",
                  "FAKE_PI_GREEN_TESTS", "FAKE_PI_OUTPUT_TOKENS",
+                 # Missions-mode knobs (PHASE3_DESIGN.md §5).
+                 "FAKE_PI_PROMPT_LOG", "FAKE_PI_WRITE_ON_PROMPT", "FAKE_PI_SETTLE_DELAY",
                  "HARNESS_PI_AUTO_RETRY", "HARNESS_RESUME_ATTEMPTS",
                  "HARNESS_RESUME_BACKOFF_S", "HARNESS_RESUME_MIN_BUDGET_S",
-                 "HARNESS_VITEST_BIN", "HARNESS_DIRECT", "HARNESS_GATEWAY_URL",
+                 "HARNESS_VITEST_BIN", "HARNESS_TSC_BIN", "HARNESS_VITE_BIN", "HARNESS_DIRECT",
+                 "HARNESS_GATEWAY_URL", "HARNESS_MODE", "HARNESS_SESSION_MODE",
+                 "HARNESS_REVIEWER", "HARNESS_COVERAGE_REPAIR", "HARNESS_FAULT",
                  # Never let a developer's real credentials reach a test process: a
                  # test must never be able to make a real model call (hard rule),
                  # regardless of whether harness/credentials.py + gateway.py exist

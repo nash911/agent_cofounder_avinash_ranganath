@@ -22,12 +22,12 @@ import json
 import os
 import pathlib
 import re
-import subprocess
 import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 
 from .log import warn
+from .proc import run_bounded
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -109,48 +109,79 @@ def observe(app_dir: PathLike, harness_dir: PathLike, timeout_s: float = DEFAULT
         "--outputFile={0}".format(output_file),
         "--passWithNoTests=false",
     ]
-    try:
-        subprocess.run(
-            argv,
-            cwd=str(app_dir),
-            timeout=max(0.1, float(timeout_s)),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+    completed = run_bounded(
+        argv,
+        cwd=str(app_dir),
+        timeout_s=max(0.1, float(timeout_s)),
+        stop_event=stop_event,
+        capture=False,
+    )
+    if completed.status == "timeout":
         warn("report observe: vitest did not finish within {0:.0f}s".format(timeout_s))
-        return dict(_EMPTY_OBSERVATION)
-    except OSError as exc:
-        warn("report observe: could not run {0}: {1}".format(binary, exc))
-        return dict(_EMPTY_OBSERVATION)
+        return empty_observation()
+    if completed.status == "interrupted":
+        warn("report observe: vitest stopped; the harness is shutting down")
+        return empty_observation()
+    if completed.status == "error":
+        warn("report observe: could not run {0}: {1}".format(binary, completed.error))
+        return empty_observation()
 
     try:
         data = json.loads(output_file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         warn("report observe: could not read {0}: {1}".format(output_file, exc))
-        return dict(_EMPTY_OBSERVATION)
+        return empty_observation()
     if not isinstance(data, dict):
-        return dict(_EMPTY_OBSERVATION)
+        return empty_observation()
 
     total = int(data.get("numTotalTests") or 0)
     passed = int(data.get("numPassedTests") or 0)
     failed = int(data.get("numFailedTests") or 0)
     names: List[str] = []
+    failures: List[Dict[str, str]] = []
     for suite in data.get("testResults") or []:
         if not isinstance(suite, dict):
             continue
         for assertion in suite.get("assertionResults") or []:
             if not isinstance(assertion, dict):
                 continue
-            if assertion.get("status") != "passed":
-                continue
             name = assertion.get("fullName") or assertion.get("title") or ""
-            if name:
+            if not name:
+                continue
+            if assertion.get("status") == "passed":
                 names.append(str(name))
+            else:
+                # Everything that is not a pass -- failed, but also skipped and
+                # todo, which the runner rejects just as hard -- is something a
+                # Repairer has to know about, so all of it lands here.
+                failures.append({"name": str(name), "message": _failure_message(assertion)})
 
     green = failed == 0 and passed > 0
-    return {"green": green, "total": total, "passed": passed, "failed": failed, "names": names}
+    return {
+        "green": green,
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "names": names,
+        "failures": failures,
+    }
+
+
+def _failure_message(assertion: Dict[str, Any]) -> str:
+    """The first assertion message of a non-passing test, capped.
+
+    Vitest repeats the same expectation across ``failureMessages``; the first
+    entry is the one that names the missing element or the mismatched value,
+    and the rest is stack.
+    """
+    messages = assertion.get("failureMessages")
+    if isinstance(messages, str):
+        first = messages
+    elif isinstance(messages, list) and messages:
+        first = messages[0] if isinstance(messages[0], str) else str(messages[0])
+    else:
+        first = ""
+    return first[:MAX_FAILURE_MESSAGE_CHARS]
 
 
 def _first_sentence(text: str) -> str:

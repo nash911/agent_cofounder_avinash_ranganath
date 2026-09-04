@@ -26,6 +26,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import stat
 import sys
 import tempfile
@@ -82,6 +83,134 @@ def _write_vitest_stub(path: pathlib.Path, tests_run) -> None:
     )
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _executable(path: pathlib.Path, script: str) -> pathlib.Path:
+    path.write_text(script, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
+def _write_tsc_stub(path: pathlib.Path, errors=(), marker=None) -> pathlib.Path:
+    """A stand-in for ``node_modules/.bin/tsc``.
+
+    With ``marker`` set, the stub is red on its **first** invocation only and
+    green afterwards -- the marker file is how one process tells the next that
+    the injected error has already been reported, since ``observe()`` spawns a
+    fresh tsc every round. That is the "injected type error repaired within the
+    cap" fixture: round 1 red, a Repairer mission, round 2 green.
+    """
+    return _executable(
+        path,
+        (
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "MARKER = {marker!r}\n"
+            "ERRORS = {errors!r}\n"
+            "red = bool(ERRORS)\n"
+            "if red and MARKER:\n"
+            "    if os.path.exists(MARKER):\n"
+            "        red = False\n"
+            "    else:\n"
+            "        open(MARKER, 'w').close()\n"
+            "if red:\n"
+            "    sys.stdout.write('\\n'.join(ERRORS) + '\\n')\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n"
+        ).format(marker=str(marker) if marker else None, errors=list(errors)),
+    )
+
+
+def _write_vite_stub(path: pathlib.Path, ok: bool = True) -> pathlib.Path:
+    """A stand-in for ``node_modules/.bin/vite``; only ``vite build`` is ever run."""
+    return _executable(
+        path,
+        (
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stdout.write({0!r})\n"
+            "sys.exit({1})\n"
+        ).format(
+            "vite v5.0.0 building for production...\n\N{CHECK MARK} built in 412ms\n"
+            if ok
+            else "error during build:\nRollupError: Could not resolve './missing.js'\n",
+            0 if ok else 1,
+        ),
+    )
+
+
+def _write_vitest_stub_mixed(path: pathlib.Path, passed, failed) -> pathlib.Path:
+    """``_write_vitest_stub`` with failures: the shape ``observe()`` repairs against."""
+    assertion_results = [{"fullName": name, "status": "passed"} for name in passed]
+    assertion_results += [
+        {
+            "fullName": name,
+            "status": "failed",
+            "failureMessages": ["Unable to find an element with the text: " + name],
+        }
+        for name in failed
+    ]
+    return _executable(
+        path,
+        (
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "output_file = None\n"
+            "for arg in sys.argv[1:]:\n"
+            "    if arg.startswith('--outputFile='):\n"
+            "        output_file = arg.split('=', 1)[1]\n"
+            "data = {0}\n"
+            "if output_file:\n"
+            "    with open(output_file, 'w', encoding='utf-8') as handle:\n"
+            "        json.dump(data, handle)\n"
+            "sys.exit(0 if not data['numFailedTests'] else 1)\n"
+        ).format(
+            json.dumps(
+                {
+                    "numTotalTests": len(assertion_results),
+                    "numPassedTests": len(passed),
+                    "numFailedTests": len(failed),
+                    "testResults": [{"assertionResults": assertion_results}],
+                }
+            )
+        ),
+    )
+
+
+def _events(stdout: bytes):
+    """Every JSON record the harness forwarded on stdout, malformed lines dropped."""
+    records = []
+    for line in stdout.splitlines():
+        try:
+            records.append(json.loads(line.decode("utf-8")))
+        except ValueError:
+            continue
+    return records
+
+
+def _prompts(path: pathlib.Path):
+    """``FAKE_PI_PROMPT_LOG``'s records, in the order the fake Pi appended them."""
+    if not path.is_file():
+        return []
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries
+
+
+def _plan_titles():
+    """The journey titles ``derive_plan`` produces for the scripted spec.
+
+    Read through the real normaliser rather than the fixture's raw JSON: the
+    vitest stub has to report the titles the Tester was asked for, and those
+    are the *normalised* ones (deduped, stripped) that end up in ``plan.json``.
+    """
+    from harness.analyst import normalize_spec
+    from harness.plan import derive_plan
+
+    raw = json.loads((support.TESTS_DIR / "fixtures" / "spec-books.json").read_text(encoding="utf-8"))
+    return [test["title"] for test in derive_plan(normalize_spec(raw))["tests"]]
 
 
 class SubprocessWiringTest(unittest.TestCase):
