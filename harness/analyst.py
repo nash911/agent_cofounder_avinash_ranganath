@@ -96,6 +96,19 @@ _FIELD = _obj({
     "message": _s("validation message when required/invalid, e.g. 'Title is required.'; '' if not required"),
 })
 
+#: A value the app *computes* from other fields rather than storing. Without
+#: this primitive the model has nowhere to put "days between two dates" or
+#: "quantity times price" but an input field the user is then asked to type --
+#: measured 2026-09-04 on a holdout set, where every test that expected the
+#: computed value failed against a field the form left at 0.
+_DERIVED = _obj({
+    "name": _s("camelCase identifier, different from every field name"),
+    "label": _s("Visible label in the row, Title Case"),
+    "rule": _s("plain-English computation over field names, e.g. 'days between Start and End', "
+               "'Quantity times Price', 'days until Due'"),
+    "unit": _s("e.g. '£' or 'days'; '' when none"),
+})
+
 _CONSTANT = _obj({
     "name": _s("UPPER_SNAKE, e.g. LOW_THRESHOLD"),
     "value": {"type": "number"},
@@ -122,12 +135,14 @@ _STAT = _obj({
     "id": _s(),
     "label": _s("e.g. 'Lent out'"),
     "rule": _s("'count of all rows' | 'count of rows where <predicate>' | 'sum of <field>'"),
+    "unit": _s("the unit the figure is read in, e.g. '£'; '' when it is a plain count"),
     "emphasis": _b("true for the one headline figure the idea asks for"),
 })
 
 _ACTION = _obj({
     "id": _s(),
     "label": _s("button text, imperative, e.g. 'Lend'"),
+    "scope": _enum("row", "all"),
     "available_rule": _s("plain-English predicate; '' when always available"),
     "effect": _s("plain-English field changes, e.g. 'set borrower to the input', 'clear borrower', 'decrease quantity by 1'; describe the field change only -- never mention a prompt, dialog or popup"),
     "input_label": _s("label of the one value the user types; '' when none"),
@@ -156,6 +171,7 @@ SCHEMA: Dict[str, Any] = _obj({
     "title_field": _s("field name shown as each row's title"),
     "subtitle_fields": _arr(_s()),
     "meta_fields": _arr(_s()),
+    "derived": _arr(_DERIVED, "values computed from other fields; [] when none"),
     "constants": _arr(_CONSTANT),
     "filters": _arr(_FILTER),
     "badges": _arr(_BADGE),
@@ -172,7 +188,10 @@ SCHEMA: Dict[str, Any] = _obj({
 #: implied behaviours the scorer looks for.
 SYSTEM_PROMPT = """You turn a non-technical product idea into a precise specification for a single-record-type browser app rendered from one configuration: fields, filters, badges, stats and actions over one list of records. Extract only what the idea states or implies; add nothing else.
 Mapping rules: each attribute named -> one field (a quantity is number, a fixed set of choices is select with Title Case options; a value only set by an action, like a borrower, is a field with in_form=false). 'which ones are X now' -> a state filter. 'how many are X' -> a stat (emphasis on the headline one). 'one type at a time' -> a field filter on the select. Anything that should stand out -> a badge whose text is what the user reads. Any verb other than add/edit/delete -> an action. Any vague threshold ('a couple', 'running low', 'overdue') -> a constant plus one assumption.
-Journeys: one per observable behaviour the idea states or implies, in the order a user would meet them; always include add, edit, delete, each filter, each stat, each action, refresh persistence, and rejecting an empty required field. Never omit an implied journey merely to simplify. Patterns the idea does not imply go in omitted_patterns with the reason, not in journeys.
+Computed values: a value worked out from other fields -- a difference of two dates, the days until or since a date, a quantity times a price -- is a derived entry, never an input field the user types. Write its rule over the field names ('days between Start and End', 'Quantity times Price'), and phrase every date rule as 'days until/since/between' -- in a derived, filter or badge rule alike.
+Scope: an effect applied to every record at once (a reset, a clear-all, an archive-all) is one action with scope 'all'; anything done to the record the user picked is scope 'row'.
+Units: a currency symbol is a unit ('£'), on the number field and on every stat or derived value that reads as money; a counted thing keeps its word unit ('pts', 'days').
+Journeys: one per observable behaviour the idea states or implies, in the order a user would meet them; always include add, edit, delete, each filter, each stat, each derived value, each action, refresh persistence, and rejecting an empty required field. Never omit an implied journey merely to simplify. Patterns the idea does not imply go in omitted_patterns with the reason, not in journeys.
 Style: journey titles are lowercase verb phrases ('lends a book and shows the borrower'); steps and expectations quote the field labels, option values, badge texts and action labels exactly as you named them; an action's effect names only the field change ('set borrower to the input'), never a prompt or dialog; a stat's rule is 'count of all rows', 'count of rows where <predicate>' or 'sum of <field>'; a badge that announces a value shows it ('Lent to {borrower}') and its text differs from every stat label and filter label.
 Keep every string short. No commentary."""
 
@@ -302,6 +321,7 @@ def normalize_spec(obj: Any) -> Dict[str, Any]:
         "title_field": title_field,
         "subtitle_fields": _keep_known(src.get("subtitle_fields"), others),
         "meta_fields": _keep_known(src.get("meta_fields"), others),
+        "derived": _normalize_derived(src.get("derived"), names),
         "constants": _normalize_constants(src.get("constants")),
         "filters": _normalize_filters(src.get("filters"), fields),
         "badges": _normalize_badges(src.get("badges")),
@@ -412,6 +432,35 @@ def _unique_strings(raw: Any) -> List[str]:
     return kept
 
 
+def _normalize_derived(raw_derived: Any, field_names: List[str]) -> List[Dict[str, str]]:
+    """Computed values, kept strictly apart from the stored fields.
+
+    A derived value is never stored and never on the form, so a name that
+    collides with a field's would put two different meanings on one key of the
+    row -- the config would read the stored column where the app renders the
+    computation. Dropping the collider is the only repair that cannot lie: the
+    value the idea asked for stays available under the field it came from.
+    A derived entry with no rule is nothing to compute, so it goes too.
+    """
+    derived: List[Dict[str, str]] = []
+    used: List[str] = list(field_names)  # so a de-duplicated name cannot land on a field either
+    for raw in _list(raw_derived):
+        if not isinstance(raw, dict):
+            continue
+        name = _camel(_text(raw.get("name")))
+        label = _text(raw.get("label"))
+        rule = _text(raw.get("rule"))
+        if not name or not label or not rule or name in field_names:
+            continue
+        derived.append({
+            "name": _unique(name, used),
+            "label": label,
+            "rule": rule,
+            "unit": _text(raw.get("unit")),
+        })
+    return derived
+
+
 def _normalize_constants(raw_constants: Any) -> List[Dict[str, Any]]:
     constants: List[Dict[str, Any]] = []
     used: List[str] = []
@@ -501,9 +550,15 @@ def _normalize_stats(raw_stats: Any) -> List[Dict[str, Any]]:
         # "The one headline figure": a second emphasis is no emphasis at all.
         emphasis = bool(raw.get("emphasis")) and not emphasised
         emphasised = emphasised or emphasis
-        stats.append(
-            {"id": _unique(identifier, used), "label": label, "rule": rule, "emphasis": emphasis}
-        )
+        stats.append({
+            "id": _unique(identifier, used),
+            "label": label,
+            "rule": rule,
+            # A money figure reads "£60", not "60": the tile formats the value
+            # with its unit exactly as a number field does.
+            "unit": _text(raw.get("unit")),
+            "emphasis": emphasis,
+        })
     return stats
 
 
@@ -519,9 +574,13 @@ def _normalize_actions(raw_actions: Any) -> List[Dict[str, Any]]:
         if not identifier or not label or not effect:
             continue
         input_label = _text(raw.get("input_label"))
+        # "row" is the safe default: a per-row button applied to one record is a
+        # smaller wrong answer than a bulk button that rewrites every record.
+        scope = _text(raw.get("scope")).lower()
         actions.append({
             "id": _unique(identifier, used),
             "label": label,
+            "scope": scope if scope in ("row", "all") else "row",
             "available_rule": _text(raw.get("available_rule")),
             "effect": effect,
             "input_label": input_label,

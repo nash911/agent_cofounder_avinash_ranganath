@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ActionDef, AnyConfig, FieldDef, Row, RowPatch } from "./config-types.js";
+import type {
+  ActionDef, AnyConfig, BulkActionDef, FieldDef, Row, RowPatch,
+} from "./config-types.js";
 import { sortRows, titleOf } from "./collection.js";
 import type { Repository, RepositoryStatus } from "./repository.js";
 
@@ -19,6 +21,8 @@ export interface RecordsApi {
   edit(id: string, values: RowPatch): void;
   remove(id: string): void;
   runAction(action: ActionDef<readonly FieldDef[]>, row: Row, input: string): void;
+  /** Applies one patch to every record the action accepts, in one step. */
+  runBulkAction(action: BulkActionDef<readonly FieldDef[]>): void;
   dismissToast(): void;
   dismissNotice(): void;
 }
@@ -95,12 +99,23 @@ export function useRecords(config: AnyConfig, repository: Repository): RecordsAp
     if (text !== undefined && text !== "") showToast({ text });
   }, [repository, showToast]);
 
+  const runBulkAction = useCallback((
+    action: BulkActionDef<readonly FieldDef[]>,
+  ) => {
+    // Every stored record, not the filtered view: a bulk action means all of
+    // them, and a chip left pressed must never silently shrink its reach.
+    const targets = repository.list()
+      .filter((row) => (action.available ? action.available(row) : true));
+    for (const row of targets) repository.update(row.id, action.apply(row));
+    showToast({ text: `${action.label} applied to ${targets.length} records` });
+  }, [repository, showToast]);
+
   const dismissNotice = useCallback(() => {
     setDismissed(repository.status().message);
   }, [repository]);
 
   return {
     rows, status, notice, toast,
-    add, edit, remove, runAction, dismissToast, dismissNotice,
+    add, edit, remove, runAction, runBulkAction, dismissToast, dismissNotice,
   };
 }

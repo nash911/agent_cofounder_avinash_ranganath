@@ -51,6 +51,33 @@ def _label_of(spec: Dict[str, Any], name: str) -> str:
     return name
 
 
+def _row_actions(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The actions that act on the one record the user picked."""
+    return [a for a in _dicts(spec.get("actions")) if _text(a.get("scope")).lower() != "all"]
+
+
+def _bulk_actions(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The actions whose effect applies to every record at once."""
+    return [a for a in _dicts(spec.get("actions")) if _text(a.get("scope")).lower() == "all"]
+
+
+def _formatted_number(value: str, unit: str) -> str:
+    """One number as the app prints it -- the scaffold's own rule, in Python.
+
+    A currency symbol (or any single non-alphanumeric mark) reads before the
+    value with no space, everything else after it with one. Measured
+    2026-09-04: the config rendered "40 £" while the test written from the same
+    spec expected "£40", and neither file was wrong about the spec -- only
+    about each other. Rendering the example here makes the two agree.
+    """
+    unit = _text(unit)
+    if not unit:
+        return value
+    if len(unit) == 1 and not unit.isalnum():
+        return unit + value
+    return "{0} {1}".format(value, unit)
+
+
 def _compute_rule(rule: str) -> str:
     """A stat rule as an unambiguous instruction.
 
@@ -154,13 +181,31 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
                 text, _text(badge.get("rule")), _badge_example(text)
             )
         )
-    for stat in _dicts(spec.get("stats")):
+    # A computed value is not a field, so nothing above mentions it -- and a
+    # Tester that has not been told it exists writes the row assertion without
+    # it, or worse, tries to type it into the form.
+    for entry in _dicts(spec.get("derived")):
+        label = _text(entry.get("label"))
+        example = _formatted_number("40", _text(entry.get("unit")))
         lines.append(
-            "- Stat tile \"{0}\" = {1} — read it with `stat(\"{0}\")`, which returns a string".format(
-                _text(stat.get("label")), _compute_rule(_text(stat.get("rule")))
+            "- Derived value \"{0}\" = {1} — the app computes it from the other fields: never "
+            "on the form, never in `addRecord`. The row shows it as \"{0} <value>\" (with a "
+            "value of 40 the row reads \"{0} {2}\"), so assert it with "
+            "`expectRow(title, \"{0} {2}\")` for the value your own data implies.".format(
+                label, _text(entry.get("rule")), example
             )
         )
-    for action in _dicts(spec.get("actions")):
+    for stat in _dicts(spec.get("stats")):
+        line = "- Stat tile \"{0}\" = {1} — read it with `stat(\"{0}\")`, which returns a string".format(
+            _text(stat.get("label")), _compute_rule(_text(stat.get("rule")))
+        )
+        unit = _text(stat.get("unit"))
+        if unit:
+            line += " rendered with its unit, e.g. \"{0}\" for a total of 60".format(
+                _formatted_number("60", unit)
+            )
+        lines.append(line)
+    for action in _row_actions(spec):
         parts = ["- Row button \"{0}\"".format(_text(action.get("label")))]
         for template, value in (
             (", asks for \"{0}\"", _text(action.get("input_label"))),
@@ -171,6 +216,24 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
             if value:
                 parts.append(template.format(value))
         lines.append("".join(parts))
+    # A bulk button is not in the row, so `runAction` (which needs a row title)
+    # cannot reach it; its own helper takes only the label.
+    for action in _bulk_actions(spec):
+        label = _text(action.get("label"))
+        line = (
+            "- Bulk button \"{0}\" applies to every record -- call "
+            "`await runBulkAction(user, \"{0}\")`".format(label)
+        )
+        if _text(action.get("confirm_text")):
+            line += (
+                ", which confirms \"{0}\" itself, so never call `confirmDialog` after "
+                "it".format(_text(action.get("confirm_text")))
+            )
+        line += (
+            "; afterwards every row has changed, and the toast reads \"{0} applied to N "
+            "records\" with N the number of records.".format(label)
+        )
+        lines.append(line)
     lines.append(
         "- Header \"{0}\", add button \"{1}\", empty state \"{2}\" / \"{3}\"".format(
             copy.get("title", ""), copy.get("addLabel", ""),
@@ -186,6 +249,23 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
             _label_of(spec, _text(spec.get("title_field")))
         )
     )
+    # Measured 2026-09-04 (a holdout case): the config printed "40 £" and the
+    # test asserted "£40". Both files read the same spec; neither was told how
+    # a unit renders, so the run failed on a string nobody chose.
+    lines.append(
+        "- A number is always printed with its unit the same way: a currency symbol comes "
+        "before the value with no space (\"£40\"), any other unit after it with a space "
+        "(\"40 pts\") — in a row, in a derived value and in a stat tile (\"£60\"). A boolean "
+        "value reads \"Yes\" or \"No\", never \"true\"/\"false\"."
+    )
+    if _needs_dates(spec):
+        lines.append(
+            "- Date values are \"yyyy-mm-dd\" strings. Anything relative to today must be "
+            "computed in the test, never hard-coded: "
+            "`const iso = (offsetDays: number) => new Date(Date.now() + offsetDays * 86400000)"
+            ".toISOString().slice(0, 10);` then `iso(0)` is today, `iso(3)` is three days "
+            "ahead and `iso(-3)` three days ago."
+        )
     # Three scaffold behaviours the journey wording actively pushes the other
     # way: journeys say "delete; confirm" (there is no confirmation), and
     # "after a refresh, filters unchanged" (`reload` remounts the app, so the
@@ -196,6 +276,13 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         "confirms any dialog itself, so never call `confirmDialog` after it; `reload()` keeps "
         "the stored records but resets the search box and the active filter; corrupt storage "
         "shows a \"could not be read\" notice."
+    )
+    # Measured 2026-09-04 (a holdout case): a test added a record and asserted
+    # `expectNoRow` on it in the same breath, which can only ever fail.
+    lines.append(
+        "- `expectNoRow(title)` asserts a record is ABSENT. Never call it for a record you "
+        "just added — assert `expectRow(title, ...)` or `rowTitles()` instead. It belongs "
+        "after a delete, or when a filter or a search hides the row."
     )
     # Measured 2026-09-04 (run python-mission-a): the badge, the stat tile and
     # a filter chip all read "Lent out", and `screen.getByText("Lent out")`
@@ -209,6 +296,22 @@ def _visible_strings(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         "`screen.getByText(exact string)`."
     )
     return "\n".join(lines)
+
+
+def _needs_dates(spec: Dict[str, Any]) -> bool:
+    """Whether any rule in this spec is relative to today.
+
+    A date field is the obvious case; a rule that counts days is the other one
+    (a filter for "the next N days" is relative even when the Analyst wrote the
+    field as text), and both make a hard-coded calendar date in the test a
+    failure that only shows up later.
+    """
+    if any(_text(field.get("kind")) == "date" for field in _dicts(spec.get("fields"))):
+        return True
+    rules = [_text(entry.get("rule")) for entry in _dicts(spec.get("derived"))]
+    rules.extend(_text(entry.get("rule")) for entry in _dicts(spec.get("filters")))
+    rules.extend(_text(entry.get("rule")) for entry in _dicts(spec.get("badges")))
+    return any(re.search(r"\bdays?\b", rule, re.IGNORECASE) for rule in rules)
 
 
 def _badge_example(text: str) -> str:

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { appConfig } from "./app-config.js";
+import { BulkActions } from "./components/BulkActions.js";
 import { PendingDialog, type Pending } from "./components/ConfirmDialog.js";
 import { FilterBar } from "./components/FilterBar.js";
 import { RecordForm } from "./components/RecordForm.js";
@@ -8,7 +9,7 @@ import { Summary } from "./components/Summary.js";
 import { Toast } from "./components/Toast.js";
 import { applyFilter, emptyTextFor, matchesSearch } from "./lib/collection.js";
 import { validateConfig } from "./lib/config-validate.js";
-import { erase, type ActionDef, type AnyConfig, type FieldDef, type Row, type RowPatch } from "./lib/config-types.js";
+import { erase, type ActionDef, type AnyConfig, type BulkActionDef, type FieldDef, type Row, type RowPatch } from "./lib/config-types.js";
 import { createLocalRepository, type Repository } from "./lib/repository.js";
 import { useRecords } from "./lib/use-records.js";
 
@@ -63,9 +64,15 @@ export function App({ config, repository }: AppProps = {}) {
     else api.runAction(action, row, "");
   }
 
+  function requestBulkAction(action: BulkActionDef<readonly FieldDef[]>): void {
+    if (action.confirm) setPending({ kind: "bulk", action });
+    else api.runBulkAction(action);
+  }
+
   function resolvePending(input: string): void {
     if (pending === null) return;
     if (pending.kind === "delete") api.remove(pending.row.id);
+    else if (pending.kind === "bulk") api.runBulkAction(pending.action);
     else api.runAction(pending.action, pending.row, input);
     setPending(null);
   }
@@ -100,6 +107,7 @@ export function App({ config, repository }: AppProps = {}) {
         </div>
       ) : null}
       <Summary config={cfg} rows={api.rows} />
+      <BulkActions config={cfg} onRun={requestBulkAction} />
       <FilterBar
         config={cfg}
         rows={api.rows}

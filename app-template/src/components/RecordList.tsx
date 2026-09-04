@@ -1,6 +1,6 @@
 import { Badge } from "./Badge.js";
 import { EmptyState } from "./EmptyState.js";
-import { badgesFor, titleOf } from "../lib/collection.js";
+import { badgesFor, derivedFor, titleOf } from "../lib/collection.js";
 import type { ActionDef, AnyConfig, FieldDef, Row } from "../lib/config-types.js";
 import { fieldByName, formatValue, listFields } from "../lib/fields.js";
 
@@ -56,6 +56,7 @@ export function RecordList(props: RecordListProps) {
           {rows.map((row) => {
             const title = titleOf(config, row);
             const badges = badgesFor(config, row);
+            const derived = derivedFor(config, row);
             const flag = badges.find((badge) => badge.tone === "warn" || badge.tone === "alert");
             const subtitle = subtitleFields
               .map((field) => formatValue(field, row[field.name]))
@@ -70,12 +71,18 @@ export function RecordList(props: RecordListProps) {
               >
                 <h3 className="row__title">{title}</h3>
                 {subtitle === "" ? null : <p className="row__sub">{subtitle}</p>}
-                {metaFields.length === 0 ? null : (
+                {metaFields.length === 0 && derived.length === 0 ? null : (
                   <dl className="row__meta">
                     {metaFields.map((field) => (
-                      <div key={field.name}>
-                        <dt>{field.label}</dt>
+                      <div key={`field:${field.name}`}>
+                        <dt>{field.label}</dt>{" "}
                         <dd>{formatValue(field, row[field.name])}</dd>
+                      </div>
+                    ))}
+                    {derived.map((entry) => (
+                      <div key={`derived:${entry.name}`}>
+                        <dt>{entry.label}</dt>{" "}
+                        <dd>{entry.value}</dd>
                       </div>
                     ))}
                   </dl>

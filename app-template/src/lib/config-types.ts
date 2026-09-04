@@ -84,10 +84,39 @@ export interface BadgeDef<F extends readonly FieldDef[]> {
   readonly tone?: Tone;
 }
 
+/** A value COMPUTED from a row — a quantity times a price, a count of days
+ *  between two dates. Never stored, never on the form, never a field: it
+ *  cannot drift out of date because it is recomputed on every render. Shown in
+ *  the row's meta line after the `metaFields`. `name` must not collide with a
+ *  field name. */
+export interface DerivedDef<F extends readonly FieldDef[]> {
+  readonly name: string;
+  readonly label: string;
+  readonly compute: (row: RowOf<F>) => number | string;
+  /** Rendered like a number field's unit: "£" before, "kg" after. */
+  readonly unit?: string;
+}
+
+/** One button that applies to EVERY record at once — a reset, a clear-all, an
+ *  archive-all. Not a row action: the button lives in its own toolbar and one
+ *  click patches every row `available` accepts. */
+export interface BulkActionDef<F extends readonly FieldDef[]> {
+  readonly id: string;
+  readonly label: string;
+  /** Ask for confirmation first. Omit to apply straight away. */
+  readonly confirm?: string;
+  /** Limit which rows are touched. Default: every row. */
+  readonly available?: (row: RowOf<F>) => boolean;
+  /** Return only the fields that change, for one row at a time. */
+  readonly apply: (row: RowOf<F>) => Patch<F>;
+}
+
 export interface StatDef<F extends readonly FieldDef[]> {
   readonly id: string;
   readonly label: string;
   readonly compute: (rows: readonly RowOf<F>[]) => number | string;
+  /** Rendered the way a number field's unit is: "£" before, "kg" after. */
+  readonly unit?: string;
   /** Render large and accented. Use it for the figure the idea asks to see. */
   readonly emphasis?: boolean;
 }
@@ -136,8 +165,13 @@ export interface AppConfig<F extends readonly FieldDef[] = readonly FieldDef[]> 
   readonly search?: boolean;
   readonly filters?: readonly Filter<F>[];
   readonly badges?: readonly BadgeDef<F>[];
+  /** Per-row values computed from the fields. Declared outside `fields` on
+   *  purpose: they are read from a row, never written to one. */
+  readonly derived?: readonly DerivedDef<F>[];
   readonly summary?: readonly StatDef<F>[];
   readonly actions?: readonly ActionDef<F>[];
+  /** Buttons that act on every record at once. */
+  readonly bulkActions?: readonly BulkActionDef<F>[];
   readonly allowEdit?: boolean;      // default true
   readonly allowDelete?: boolean;    // default true
   /** Delete is one click plus an Undo toast. Default true.

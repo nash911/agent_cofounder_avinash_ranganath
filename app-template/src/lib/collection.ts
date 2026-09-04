@@ -1,7 +1,7 @@
 import type {
   AnyConfig, FieldDef, Filter, RecordValue, Row, Tone,
 } from "./config-types.js";
-import { fieldByName } from "./fields.js";
+import { fieldByName, formatNumber } from "./fields.js";
 
 export interface FilterOption {
   readonly id: string;        // "all" | `field:${value}` | `state:${stateId}`
@@ -9,6 +9,9 @@ export interface FilterOption {
   readonly count: number;
 }
 export interface ResolvedBadge { readonly id: string; readonly text: string; readonly tone: Tone }
+export interface ResolvedDerived {
+  readonly name: string; readonly label: string; readonly value: string;
+}
 export interface ResolvedStat {
   readonly id: string; readonly label: string;
   readonly value: string; readonly emphasis: boolean;
@@ -159,11 +162,27 @@ export function badgesFor(config: AnyConfig, row: Row): ResolvedBadge[] {
     .map((badge) => ({ id: badge.id, text: badge.text(row), tone: badge.tone ?? "neutral" }));
 }
 
+/** A number carries its unit the way a number field does ("£40", "40 pts");
+ *  a string is already the text the reader wants. */
+function withUnit(value: number | string, unit?: string): string {
+  return typeof value === "number" ? formatNumber(value, unit) : String(value);
+}
+
+/** Values computed from a row and never stored. Recomputed on every render, so
+ *  they cannot go stale the way a hand-maintained field would. */
+export function derivedFor(config: AnyConfig, row: Row): ResolvedDerived[] {
+  return (config.derived ?? []).map((entry) => ({
+    name: entry.name,
+    label: entry.label,
+    value: withUnit(entry.compute(row), entry.unit),
+  }));
+}
+
 export function computeStats(config: AnyConfig, rows: readonly Row[]): ResolvedStat[] {
   return (config.summary ?? []).map((stat) => ({
     id: stat.id,
     label: stat.label,
-    value: String(stat.compute(rows)),
+    value: withUnit(stat.compute(rows), stat.unit),
     emphasis: stat.emphasis ?? false,
   }));
 }

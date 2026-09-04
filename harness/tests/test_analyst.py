@@ -286,6 +286,97 @@ class BadgeStatActionTest(unittest.TestCase):
         self.assertFalse(spec["actions"][0]["input_required"])
 
 
+class DerivedTest(unittest.TestCase):
+    """The computed-value primitive: names, collisions, and the missing rule.
+
+    A value the app works out from other fields (a day count, a quantity times
+    a price) has to live somewhere other than ``fields``, or the Builder stores
+    it and the form asks the user to type the answer.
+    """
+
+    def test_names_are_camel_cased_deduplicated_and_the_rule_survives(self):
+        spec = analyst.normalize_spec(_spec(derived=[
+            {"name": "day count", "label": "Day Count", "rule": "days between Start and End",
+             "unit": "days"},
+            {"name": "dayCount", "label": "Second", "rule": "days since Start", "unit": ""},
+            "nonsense",
+        ]))
+        self.assertEqual([d["name"] for d in spec["derived"]], ["dayCount", "dayCount2"])
+        self.assertEqual(spec["derived"][0]["rule"], "days between Start and End")
+        self.assertEqual(spec["derived"][0]["unit"], "days")
+        self.assertEqual(spec["derived"][1]["unit"], "")
+
+    def test_a_derived_name_that_collides_with_a_field_is_dropped(self):
+        # A derived value is never stored: sharing a key with a field would put
+        # the stored column and the computation on one name.
+        spec = analyst.normalize_spec(_spec(
+            fields=[_field(name="title", label="Title"),
+                    _field(name="total", label="Total", kind="number")],
+            derived=[{"name": "total", "label": "Total", "rule": "Quantity times Price",
+                      "unit": ""},
+                     {"name": "value", "label": "Value", "rule": "Quantity times Price",
+                      "unit": "£"}],
+        ))
+        self.assertEqual([d["name"] for d in spec["derived"]], ["value"])
+        self.assertEqual(spec["derived"][0]["unit"], "£")
+
+    def test_a_deduplicated_name_never_lands_on_a_field_either(self):
+        spec = analyst.normalize_spec(_spec(
+            fields=[_field(name="title", label="Title"), _field(name="span2", label="Span Two")],
+            derived=[{"name": "span", "label": "Span", "rule": "days between A and B", "unit": ""},
+                     {"name": "span", "label": "Span Again", "rule": "days since A", "unit": ""}],
+        ))
+        self.assertEqual([d["name"] for d in spec["derived"]], ["span", "span3"])
+
+    def test_a_derived_entry_without_a_rule_or_a_label_is_dropped(self):
+        # Nothing to compute and nothing to render: the Builder would invent both.
+        spec = analyst.normalize_spec(_spec(derived=[
+            {"name": "span", "label": "Span", "rule": "  ", "unit": ""},
+            {"name": "gap", "label": "", "rule": "days since Start", "unit": ""},
+            {"name": "", "label": "Nameless", "rule": "days since Start", "unit": ""},
+        ]))
+        self.assertEqual(spec["derived"], [])
+
+    def test_a_spec_with_no_derived_key_normalises_to_an_empty_list(self):
+        self.assertEqual(analyst.normalize_spec(_spec())["derived"], [])
+        for garbage in (None, [], "spec", 7):
+            self.assertEqual(analyst.normalize_spec(garbage)["derived"], [])
+
+
+class ActionScopeAndStatUnitTest(unittest.TestCase):
+    def test_scope_defaults_to_row_and_only_all_survives(self):
+        # "row" is the safe default: a bulk button written as a row action
+        # changes one record, a row action written as a bulk button changes all.
+        spec = analyst.normalize_spec(_spec(actions=[
+            {"id": "one", "label": "One", "effect": "set done to true"},
+            {"id": "two", "label": "Two", "scope": "ALL", "effect": "set done to false"},
+            {"id": "three", "label": "Three", "scope": "everything", "effect": "clear holder"},
+            {"id": "four", "label": "Four", "scope": "row", "effect": "clear holder"},
+        ]))
+        self.assertEqual([a["scope"] for a in spec["actions"]], ["row", "all", "row", "row"])
+
+    def test_a_stat_carries_its_unit_as_a_stripped_string(self):
+        spec = analyst.normalize_spec(_spec(stats=[
+            {"id": "value", "label": "Value", "rule": "sum of price", "unit": "  £ "},
+            {"id": "count", "label": "Count", "rule": "count of all rows"},
+            {"id": "odd", "label": "Odd", "rule": "count of all rows", "unit": 7},
+        ]))
+        self.assertEqual([s["unit"] for s in spec["stats"]], ["£", "", ""])
+
+
+class OldSpecShapeTest(unittest.TestCase):
+    """The 2026-09-03 fixture predates every key added here and must still build."""
+
+    def test_the_probe_spec_normalises_with_the_new_keys_defaulted(self):
+        spec = analyst.normalize_spec(books_spec())
+        self.assertTrue(analyst.spec_is_usable(spec))
+        self.assertEqual(spec["derived"], [])
+        self.assertEqual([a["scope"] for a in spec["actions"]], ["row", "row"])
+        self.assertEqual([s["unit"] for s in spec["stats"]], [""])
+        # Still idempotent now that the defaults are written back into the spec.
+        self.assertEqual(analyst.normalize_spec(spec), spec)
+
+
 class JourneyTest(unittest.TestCase):
     def test_empty_journeys_stay_empty_and_make_the_spec_unusable(self):
         # Without journeys there is nothing to test and nothing to report.
@@ -383,6 +474,26 @@ class SchemaAndPromptTest(unittest.TestCase):
             self.assertIn(name, properties)
         self.assertEqual(properties["fields"]["items"]["properties"]["kind"]["enum"],
                          list(analyst.FIELD_KINDS))
+
+    def test_the_schema_offers_the_three_shapes_the_holdout_set_had_no_word_for(self):
+        properties = analyst.SCHEMA["properties"]
+        derived = properties["derived"]["items"]
+        self.assertEqual(sorted(derived["properties"]), ["label", "name", "rule", "unit"])
+        self.assertEqual(sorted(derived["required"]), ["label", "name", "rule", "unit"])
+        self.assertEqual(properties["actions"]["items"]["properties"]["scope"]["enum"],
+                         ["row", "all"])
+        self.assertIn("unit", properties["stats"]["items"]["properties"])
+        self.assertIn("unit", properties["stats"]["items"]["required"])
+
+    def test_the_system_prompt_names_each_new_primitive_in_general_terms(self):
+        prompt = analyst.SYSTEM_PROMPT
+        self.assertIn("derived entry, never an input field", prompt)
+        self.assertIn("days until/since/between", prompt)
+        self.assertIn("scope 'all'", prompt)
+        self.assertIn("scope 'row'", prompt)
+        self.assertIn("a currency symbol is a unit", prompt)
+        # A computed value nobody looks at is a computed value nobody tested.
+        self.assertIn("each derived value", prompt)
 
     def test_max_tokens_leaves_headroom_over_the_measured_1303(self):
         self.assertEqual(analyst.MAX_TOKENS, 2500)

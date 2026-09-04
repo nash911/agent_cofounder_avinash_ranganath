@@ -1,0 +1,199 @@
+{
+  "app_name": "Holder Tally",
+  "tagline": "Track records per holder and start over",
+  "summary": "A single list of records, each belonging to a holder and worth a quantity of points; mark one complete, total each holder's points, and start every record over at once.",
+  "noun": "record",
+  "noun_plural": "records",
+  "fields": [
+    {
+      "name": "name",
+      "label": "Name",
+      "kind": "text",
+      "required": true,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Name is required."
+    },
+    {
+      "name": "holder",
+      "label": "Holder",
+      "kind": "select",
+      "required": true,
+      "options": [
+        "Holder A",
+        "Holder B",
+        "Holder C"
+      ],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Holder is required."
+    },
+    {
+      "name": "quantity",
+      "label": "Quantity",
+      "kind": "number",
+      "required": true,
+      "options": [],
+      "integer": true,
+      "unit": "pts",
+      "in_form": true,
+      "message": "Quantity is required."
+    },
+    {
+      "name": "complete",
+      "label": "Complete",
+      "kind": "boolean",
+      "required": false,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": ""
+    }
+  ],
+  "title_field": "name",
+  "subtitle_fields": [
+    "holder",
+    "quantity"
+  ],
+  "meta_fields": [
+    "complete"
+  ],
+  "derived": [],
+  "constants": [],
+  "filters": [
+    {
+      "kind": "field",
+      "field": "holder",
+      "id": "",
+      "label": "All holders",
+      "rule": "",
+      "empty_text": ""
+    },
+    {
+      "kind": "state",
+      "field": "",
+      "id": "openOnes",
+      "label": "Not complete",
+      "rule": "Complete is false",
+      "empty_text": "Everything is complete."
+    }
+  ],
+  "badges": [
+    {
+      "id": "complete",
+      "rule": "Complete is true",
+      "tone": "good",
+      "text": "Complete"
+    }
+  ],
+  "stats": [
+    {
+      "id": "holderATotal",
+      "label": "Holder A total",
+      "rule": "sum of Quantity where Holder is Holder A and Complete is true",
+      "unit": "pts",
+      "emphasis": true
+    },
+    {
+      "id": "openCount",
+      "label": "Not complete",
+      "rule": "count of rows where Complete is false",
+      "unit": "",
+      "emphasis": false
+    }
+  ],
+  "actions": [
+    {
+      "id": "markComplete",
+      "label": "Mark complete",
+      "scope": "row",
+      "available_rule": "Complete is false",
+      "effect": "set Complete to true",
+      "input_label": "",
+      "input_required": false,
+      "confirm_text": "",
+      "toast": "Marked complete"
+    },
+    {
+      "id": "startOver",
+      "label": "Start over",
+      "scope": "all",
+      "available_rule": "",
+      "effect": "set Complete to false",
+      "input_label": "",
+      "input_required": false,
+      "confirm_text": "Start over? Every record is marked not complete.",
+      "toast": ""
+    }
+  ],
+  "journeys": [
+    {
+      "title": "adds a record and shows it in the list",
+      "kind": "explicit",
+      "steps": "Add a record with Name, Holder 'Holder A' and Quantity '5'; save",
+      "expect": "The record is listed without the Complete badge"
+    },
+    {
+      "title": "rejects an empty required field",
+      "kind": "implied",
+      "steps": "Add a record with Name blank; save",
+      "expect": "The form shows 'Name is required.' and nothing is added"
+    },
+    {
+      "title": "marks one record complete",
+      "kind": "explicit",
+      "steps": "Use Mark complete on a record that is not complete",
+      "expect": "That record shows the 'Complete' badge"
+    },
+    {
+      "title": "edits the quantity of a record",
+      "kind": "implied",
+      "steps": "Edit a record and change Quantity to '3'; save",
+      "expect": "The record shows the new quantity"
+    },
+    {
+      "title": "deletes a record",
+      "kind": "implied",
+      "steps": "Delete a record",
+      "expect": "The record is no longer listed"
+    },
+    {
+      "title": "filters to one holder",
+      "kind": "explicit",
+      "steps": "Apply the Holder A chip",
+      "expect": "Only that holder's records are listed"
+    },
+    {
+      "title": "totals a holder's points",
+      "kind": "explicit",
+      "steps": "Read the Holder A total stat",
+      "expect": "The stat sums the completed records of that holder"
+    },
+    {
+      "title": "starts every record over at once",
+      "kind": "explicit",
+      "steps": "Use Start over and confirm",
+      "expect": "No record shows the 'Complete' badge any more"
+    },
+    {
+      "title": "preserves records across a browser refresh",
+      "kind": "implied",
+      "steps": "Add a record; refresh the browser",
+      "expect": "The record is still listed with the same values"
+    }
+  ],
+  "omitted_patterns": [
+    {
+      "pattern": "History of earlier rounds",
+      "reason": "The idea asks only to start over, not to keep what came before"
+    }
+  ],
+  "assumptions": [
+    "Starting over marks every record not complete rather than deleting it",
+    "A record counts toward its holder's total only once it is complete"
+  ]
+}

@@ -1,0 +1,194 @@
+{
+  "app_name": "Price List",
+  "tagline": "Track what each record is worth",
+  "summary": "A single list of records, each with a category, a price and a quantity; see what a record is worth, mark one settled, and total the value still open.",
+  "noun": "record",
+  "noun_plural": "records",
+  "fields": [
+    {
+      "name": "name",
+      "label": "Name",
+      "kind": "text",
+      "required": true,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Name is required."
+    },
+    {
+      "name": "category",
+      "label": "Category",
+      "kind": "select",
+      "required": true,
+      "options": [
+        "Household",
+        "Tools",
+        "Media",
+        "Other"
+      ],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Category is required."
+    },
+    {
+      "name": "price",
+      "label": "Price",
+      "kind": "number",
+      "required": true,
+      "options": [],
+      "integer": false,
+      "unit": "£",
+      "in_form": true,
+      "message": "Price is required."
+    },
+    {
+      "name": "quantity",
+      "label": "Quantity",
+      "kind": "number",
+      "required": true,
+      "options": [],
+      "integer": true,
+      "unit": "",
+      "in_form": true,
+      "message": "Quantity is required."
+    },
+    {
+      "name": "settled",
+      "label": "Settled",
+      "kind": "boolean",
+      "required": false,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": false,
+      "message": ""
+    }
+  ],
+  "title_field": "name",
+  "subtitle_fields": [
+    "category",
+    "price"
+  ],
+  "meta_fields": [
+    "settled"
+  ],
+  "derived": [
+    {
+      "name": "value",
+      "label": "Value",
+      "rule": "Quantity times Price",
+      "unit": "£"
+    }
+  ],
+  "constants": [],
+  "filters": [
+    {
+      "kind": "field",
+      "field": "category",
+      "id": "",
+      "label": "All categories",
+      "rule": "",
+      "empty_text": ""
+    },
+    {
+      "kind": "state",
+      "field": "",
+      "id": "open",
+      "label": "Open",
+      "rule": "Settled is false",
+      "empty_text": "Nothing is open."
+    }
+  ],
+  "badges": [
+    {
+      "id": "settled",
+      "rule": "Settled is true",
+      "tone": "good",
+      "text": "Settled"
+    }
+  ],
+  "stats": [
+    {
+      "id": "openValue",
+      "label": "Open value",
+      "rule": "sum of Value where Settled is false",
+      "unit": "£",
+      "emphasis": true
+    }
+  ],
+  "actions": [
+    {
+      "id": "markSettled",
+      "label": "Mark settled",
+      "scope": "row",
+      "available_rule": "Settled is false",
+      "effect": "set Settled to true",
+      "input_label": "",
+      "input_required": false,
+      "confirm_text": "",
+      "toast": "Record settled"
+    }
+  ],
+  "journeys": [
+    {
+      "title": "adds a record and shows its price",
+      "kind": "explicit",
+      "steps": "Add a record with Name, Category 'Household', Price '40' and Quantity '1'; save",
+      "expect": "The record is listed with its price"
+    },
+    {
+      "title": "rejects an empty required field",
+      "kind": "implied",
+      "steps": "Add a record with Name blank; save",
+      "expect": "The form shows 'Name is required.' and nothing is added"
+    },
+    {
+      "title": "edits the price of a record",
+      "kind": "explicit",
+      "steps": "Edit a record and change Price to '35'; save",
+      "expect": "The record shows the new price"
+    },
+    {
+      "title": "deletes a record",
+      "kind": "implied",
+      "steps": "Delete a record",
+      "expect": "The record is no longer listed"
+    },
+    {
+      "title": "marks a record settled",
+      "kind": "explicit",
+      "steps": "Use Mark settled on a record",
+      "expect": "The record shows the 'Settled' badge"
+    },
+    {
+      "title": "filters to the open records",
+      "kind": "explicit",
+      "steps": "Apply the Open filter",
+      "expect": "Only records that are not settled are listed"
+    },
+    {
+      "title": "totals the value still open",
+      "kind": "explicit",
+      "steps": "Read the Open value stat",
+      "expect": "The stat sums the value of every record that is not settled"
+    },
+    {
+      "title": "preserves records across a browser refresh",
+      "kind": "implied",
+      "steps": "Add a record; refresh the browser",
+      "expect": "The record is still listed with the same values"
+    }
+  ],
+  "omitted_patterns": [
+    {
+      "pattern": "Payment handling",
+      "reason": "The idea tracks amounts only, never a payment"
+    }
+  ],
+  "assumptions": [
+    "Prices are in £ and may have decimals",
+    "A record's value is its quantity times its price"
+  ]
+}

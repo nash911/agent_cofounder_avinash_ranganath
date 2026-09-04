@@ -1,0 +1,175 @@
+{
+  "app_name": "Span Register",
+  "tagline": "Log records and count their days",
+  "summary": "A single list of records, each with a start and an end date, a status, and the number of days it spans; flag the ones starting soon and total the days.",
+  "noun": "record",
+  "noun_plural": "records",
+  "fields": [
+    {
+      "name": "name",
+      "label": "Name",
+      "kind": "text",
+      "required": true,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Name is required."
+    },
+    {
+      "name": "start",
+      "label": "Start",
+      "kind": "date",
+      "required": true,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Start is required."
+    },
+    {
+      "name": "end",
+      "label": "End",
+      "kind": "date",
+      "required": true,
+      "options": [],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "End is required."
+    },
+    {
+      "name": "status",
+      "label": "Status",
+      "kind": "select",
+      "required": true,
+      "options": [
+        "Open",
+        "Settled"
+      ],
+      "integer": false,
+      "unit": "",
+      "in_form": true,
+      "message": "Status is required."
+    }
+  ],
+  "title_field": "name",
+  "subtitle_fields": [
+    "start",
+    "end"
+  ],
+  "meta_fields": [
+    "status"
+  ],
+  "derived": [
+    {
+      "name": "span",
+      "label": "Span",
+      "rule": "days between Start and End",
+      "unit": "days"
+    }
+  ],
+  "constants": [
+    {
+      "name": "SOON_WINDOW_DAYS",
+      "value": 7,
+      "comment": "'soon' is read as the next 7 days"
+    }
+  ],
+  "filters": [
+    {
+      "kind": "field",
+      "field": "status",
+      "id": "",
+      "label": "All statuses",
+      "rule": "",
+      "empty_text": ""
+    },
+    {
+      "kind": "state",
+      "field": "",
+      "id": "soon",
+      "label": "Starting soon",
+      "rule": "days until Start is at most SOON_WINDOW_DAYS",
+      "empty_text": "Nothing starts soon."
+    }
+  ],
+  "badges": [
+    {
+      "id": "soon",
+      "rule": "days until Start is at most SOON_WINDOW_DAYS",
+      "tone": "info",
+      "text": "Starting soon"
+    }
+  ],
+  "stats": [
+    {
+      "id": "totalSpan",
+      "label": "Total days",
+      "rule": "sum of Span",
+      "unit": "days",
+      "emphasis": true
+    }
+  ],
+  "actions": [],
+  "journeys": [
+    {
+      "title": "adds a record and shows its span",
+      "kind": "explicit",
+      "steps": "Add a record with Name, Start today and End three days from today; save",
+      "expect": "The record is listed and shows its Span"
+    },
+    {
+      "title": "rejects an empty required field",
+      "kind": "implied",
+      "steps": "Add a record with Name blank; save",
+      "expect": "The form shows 'Name is required.' and nothing is added"
+    },
+    {
+      "title": "edits a record and recomputes its span",
+      "kind": "implied",
+      "steps": "Edit the record and move End one day later; save",
+      "expect": "The record's Span is one day larger"
+    },
+    {
+      "title": "deletes a record",
+      "kind": "implied",
+      "steps": "Delete the record",
+      "expect": "The record is no longer listed"
+    },
+    {
+      "title": "filters to the records starting soon",
+      "kind": "explicit",
+      "steps": "Apply the Starting soon filter",
+      "expect": "Only records whose Start is inside the window are listed"
+    },
+    {
+      "title": "flags a record starting soon",
+      "kind": "implied",
+      "steps": "Add a record whose Start is inside the window",
+      "expect": "The record shows the 'Starting soon' badge"
+    },
+    {
+      "title": "totals the days across every record",
+      "kind": "explicit",
+      "steps": "Read the Total days stat",
+      "expect": "The stat shows the sum of every record's Span"
+    },
+    {
+      "title": "preserves records across a browser refresh",
+      "kind": "implied",
+      "steps": "Add a record; refresh the browser",
+      "expect": "The record is still listed with the same values"
+    }
+  ],
+  "omitted_patterns": [
+    {
+      "pattern": "Sharing between people",
+      "reason": "The idea describes one person on one computer"
+    }
+  ],
+  "assumptions": [
+    "SOON_WINDOW_DAYS is 7, reading 'soon' as the coming week",
+    "Span is the whole number of days from Start to End"
+  ]
+}

@@ -2,10 +2,13 @@ import { useState, type FormEvent } from "react";
 import { Dialog } from "./Dialog.js";
 import { Field } from "./Field.js";
 import { titleOf } from "../lib/collection.js";
-import type { ActionDef, AnyConfig, FieldDef, Row } from "../lib/config-types.js";
+import type {
+  ActionDef, AnyConfig, BulkActionDef, FieldDef, Row,
+} from "../lib/config-types.js";
 import { validateField } from "../lib/fields.js";
 
 type AnyAction = ActionDef<readonly FieldDef[]>;
+type AnyBulkAction = BulkActionDef<readonly FieldDef[]>;
 
 export interface ConfirmDialogProps {
   readonly title: string;
@@ -69,12 +72,14 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
   );
 }
 
-/** What `App.tsx` is waiting on: a delete that needs confirming, or an action
- *  that declared `input` and/or `confirm`. Actions with neither never reach
- *  here — they run straight away. */
+/** What `App.tsx` is waiting on: a delete that needs confirming, an action
+ *  that declared `input` and/or `confirm`, or a bulk action that declared
+ *  `confirm`. Actions with neither never reach here — they run straight
+ *  away. */
 export type Pending =
   | { readonly kind: "delete"; readonly row: Row }
-  | { readonly kind: "action"; readonly action: AnyAction; readonly row: Row };
+  | { readonly kind: "action"; readonly action: AnyAction; readonly row: Row }
+  | { readonly kind: "bulk"; readonly action: AnyBulkAction };
 
 function inputField(input: NonNullable<AnyAction["input"]>): FieldDef {
   if (input.kind === "number") {
@@ -96,6 +101,17 @@ export interface PendingDialogProps {
 /** Turns a `Pending` into `ConfirmDialog` props, so `App.tsx` carries none of
  *  this wiring. */
 export function PendingDialog({ config, pending, onResolve, onCancel }: PendingDialogProps) {
+  if (pending.kind === "bulk") {
+    return (
+      <ConfirmDialog
+        title={pending.action.label}
+        body={pending.action.confirm}
+        confirmLabel={pending.action.label}
+        onConfirm={() => onResolve("")}
+        onCancel={onCancel}
+      />
+    );
+  }
   const title = titleOf(config, pending.row);
   if (pending.kind === "delete") {
     return (

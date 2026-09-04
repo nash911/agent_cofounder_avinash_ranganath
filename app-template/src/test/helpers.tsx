@@ -108,6 +108,14 @@ export async function runAction(user: UserEvent, label: string, title: string, i
   await user.click(confirmButton(dialog));
 }
 
+/** Clicks the bulk action button named `label` in the "Actions" toolbar, then
+ *  confirms if a dialog opens. One click, every record. */
+export async function runBulkAction(user: UserEvent, label: string): Promise<void> {
+  const group = screen.getByRole("group", { name: "Actions" });
+  await user.click(within(group).getByRole("button", { name: nameIs(label) }));
+  if (screen.queryByRole("dialog")) await confirmDialog(user);
+}
+
 /** Clicks the filter chip whose accessible name starts with `label`. */
 export async function chooseFilter(user: UserEvent, label: string | RegExp): Promise<void> {
   const chips = screen.getAllByRole("button").filter((b) => b.hasAttribute("aria-pressed"));

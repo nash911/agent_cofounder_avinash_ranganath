@@ -6,8 +6,13 @@ import { screen } from "@testing-library/react";
 import {
   addRecord, chooseFilter, confirmDialog, corruptStorage, editRecord,
   expectNoRow, expectRow, reload, removeRecord, renderApp, row, rowTitles,
-  runAction, search, stat,
+  runAction, runBulkAction, search, stat,
 } from "./helpers.js";
+
+/** A date N days from today, as the `yyyy-mm-dd` a date field stores. Never
+ *  write a literal date in a test: the calendar moves and the test rots. */
+const iso = (offsetDays: number) =>
+  new Date(Date.now() + offsetDays * 86400000).toISOString().slice(0, 10);
 
 describe("journeys", () => {
   it("adds a record and shows it in the list", async () => {
@@ -62,6 +67,45 @@ describe("journeys", () => {
     const { user } = renderApp();
     await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1" });
     expect(stat("Running low")).toBe("1");
+  });
+
+  it("shows a value computed from other fields", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "2", Price: "4" });
+    expectRow("Alpha", "Value", "£8");
+  });
+
+  it("renders a currency unit before the number", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1", Price: "4" });
+    expectRow("Alpha", "£4");
+  });
+
+  it("shows a stat with its unit", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "2", Price: "4" });
+    expect(stat("Stock value")).toBe("£8");
+  });
+
+  it("narrows the list by a date-relative rule", async () => {
+    const { user } = renderApp();
+    await addRecord(user, { Name: "Alpha", Category: "Type A", Quantity: "1", "Last checked": iso(-30) });
+    await addRecord(user, { Name: "Beta", Category: "Type A", Quantity: "1", "Last checked": iso(0) });
+    await chooseFilter(user, /Stale/);
+    expect(rowTitles()).toEqual(["Alpha"]);
+  });
+
+  it("runs one action over every record at once", async () => {
+    const { user } = renderApp();
+    for (const name of ["Alpha", "Beta", "Gamma"]) {
+      await addRecord(user, { Name: name, Category: "Type A", Quantity: "1" });
+      await runAction(user, "Mark held", name, "Sam");
+    }
+    await runBulkAction(user, "Mark all returned");
+    expect(screen.getByText("Mark all returned applied to 3 records")).toBeVisible();
+    for (const name of ["Alpha", "Beta", "Gamma"]) {
+      expect(row(name).textContent).not.toContain("Held by Sam");
+    }
   });
 
   it("runs an action that changes state", async () => {

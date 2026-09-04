@@ -96,9 +96,13 @@ DEFAULT_DIRECT_MODEL = "zai-org/GLM-5.2"
 DEFAULT_DIRECT_PROVIDER = "berget"
 
 #: The Analyst's slice of the run's wall clock. Measured 2026-09-03 (probe1,
-#: real Berget call): 444 in / 1,303 out in 42 s. 90 s leaves room for one
-#: retry without ever letting a hung gateway eat the Builder's time.
-ANALYST_MAX_S = 90.0
+#: real Berget call): 444 in / 1,303 out in 42 s. A harder idea writes a longer
+#: spec -- more journeys, and now the derived values too -- and at the ~30 tok/s
+#: measured on a holdout case (2026-09-04) that spec ran past 90 s, so the whole
+#: run fell back to the specless path over a call that was about to succeed.
+#: 150 s covers that spec with a retry and still cannot eat the Builder's time:
+#: the deadline is the *minimum* of this and the run's own remaining margin.
+ANALYST_MAX_S = 150.0
 
 #: Grace for the ``abort`` acknowledgement (``agent_settled`` or the response).
 ABORT_GRACE_S = 5.0

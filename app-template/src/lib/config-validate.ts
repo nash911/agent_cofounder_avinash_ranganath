@@ -62,12 +62,24 @@ export function validateConfig(config: AnyConfig): ConfigProblem[] {
     unknown(filter.field, `filter "${filter.allLabel ?? filter.field}"`, `filters[${index}]`);
   });
 
+  // A derived value is computed on every render, never stored. Reusing a field
+  // name would leave the two silently competing for one meta slot.
+  (config.derived ?? []).forEach((entry, index) => {
+    if (!known.has(entry.name)) return;
+    problems.push({
+      where: `derived[${index}]`,
+      message: `Derived name "${entry.name}" is already a field name. A derived value is never stored, so give it a name of its own.`,
+    });
+  });
+
   const seenId = new Set<string>();
   const ids: readonly (readonly [string, readonly { readonly id: string }[]])[] = [
     ["filters", (config.filters ?? []).filter((f) => f.kind === "state")],
     ["badges", config.badges ?? []],
+    ["derived", (config.derived ?? []).map((entry) => ({ id: entry.name }))],
     ["summary", config.summary ?? []],
     ["actions", config.actions ?? []],
+    ["bulkActions", config.bulkActions ?? []],
   ];
   for (const [where, entries] of ids) {
     for (const entry of entries) {

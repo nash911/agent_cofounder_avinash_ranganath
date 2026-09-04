@@ -74,14 +74,27 @@ export function toValues(fields: readonly FieldDef[], draft: Draft): RowPatch {
   return values;
 }
 
+/** A unit that is a currency symbol -- or any single non-alphanumeric
+ *  character -- reads before the number with no space: "£40". Every other unit
+ *  reads after it with one space: "40 pts". One rule, so a field, a derived
+ *  value and a stat tile never disagree about the same money. */
+function unitLeads(unit: string): boolean {
+  return "£$€¥".includes(unit) || (unit.length === 1 && !/[a-z0-9]/i.test(unit));
+}
+
+/** A number as the user reads it, with its unit in the right place. */
+export function formatNumber(value: number | string, unit?: string): string {
+  const text = String(value);
+  if (unit === undefined || unit === "") return text;
+  return unitLeads(unit) ? `${unit}${text}` : `${text} ${unit}`;
+}
+
 /** One stored value as the user reads it. */
 export function formatValue(field: FieldDef, value: RecordValue | undefined): string {
   if (value === undefined) return "";
   switch (field.kind) {
     case "number":
-      return field.unit !== undefined && field.unit !== ""
-        ? `${String(value)} ${field.unit}`
-        : String(value);
+      return formatNumber(String(value), field.unit);
     case "boolean":
       return value === true ? "Yes" : "No";
     default:

@@ -29,11 +29,14 @@ from typing import Any, Dict, List, Optional, Tuple
 # The cheat sheet and the spec primitives both briefs share. Imported under
 # their private names so the rest of this module reads exactly as before.
 from .specstrings import (
+    _bulk_actions,
     _compute_rule,
     _copy,
     _dicts,
     _join,
     _label_of,
+    _needs_dates,
+    _row_actions,
     _strings,
     _text,
     _visible_strings,
@@ -60,8 +63,9 @@ MAX_FEATURES = 12
 #: them is what keeps the Tester from inventing queries the scaffold cannot
 #: answer -- it never reads the file.
 TEST_HELPERS = (
-    "renderApp, addRecord, editRecord, removeRecord, runAction, chooseFilter, search, reload, "
-    "corruptStorage, row, rowTitles, expectRow, expectNoRow, stat, confirmDialog, fill"
+    "renderApp, addRecord, editRecord, removeRecord, runAction, runBulkAction, chooseFilter, "
+    "search, reload, corruptStorage, row, rowTitles, expectRow, expectNoRow, stat, "
+    "confirmDialog, fill"
 )
 
 #: Two capabilities the scaffold renders whatever the spec says: ``FilterBar``
@@ -205,6 +209,14 @@ def builder_brief(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
     plan = plan if isinstance(plan, dict) else {}
     outline = json.dumps(_config_outline(spec, plan), indent=1, ensure_ascii=False)
     constants = _dicts(spec.get("constants"))
+    derived = _dicts(spec.get("derived"))
+    # A day count is hand-rolled wrongly whether it is a derived value or a
+    # predicate ("within the next N days"), so the helper import is offered
+    # whenever the config could need one. `_needs_dates` is the Tester's own
+    # test (a date field, or any rule that counts days -- a date the Analyst
+    # wrote as text still needs the helpers), so the two briefs cannot
+    # disagree about whether this idea is date-relative.
+    dated = bool(derived) or _needs_dates(spec)
 
     rules = [
         "One `write` of the whole file. Nothing else -- no other file, no command, no reading.",
@@ -237,7 +249,36 @@ def builder_brief(spec: Dict[str, Any], plan: Dict[str, Any]) -> str:
         "value in a block body, the result must be one of that field's exact options, never a "
         "plain `string`, or `tsc` fails with TS2719.",
         "Every `required` field keeps its `message` exactly as written -- a test asserts on it.",
+        # Measured 2026-09-04 (a holdout case): an instant one-click action was
+        # given an input dialog and a confirmation the spec never asked for, and
+        # every test that simply clicked the button failed.
+        "Never add `input` or `confirm` to an action unless it appears in the data above: an "
+        "action with neither is one click that applies immediately.",
+        # Measured 2026-09-04 (a holdout case): the config printed "40 £" while
+        # the test written from the same spec expected "£40".
+        "A `unit` is rendered by the scaffold, never by you: a currency symbol prints before "
+        "the value (`£40`), any other unit after it (`40 pts`) -- field, derived value and "
+        "stat alike. Give the `unit`; return a bare number from every `compute`.",
     ]
+    if derived:
+        rules.append(
+            "Each `derived` entry is computed, never stored and never on the form: write "
+            "`compute: (row) => ...` over `row.<name>` of the fields above. It renders in the "
+            "row's meta list; do not add a field for it."
+        )
+    if dated:
+        rules.append(
+            "Date fields are `\"yyyy-mm-dd\"` strings: do every day count with the scaffold's "
+            "helpers, `import { daysBetween, daysUntil, daysSince, today } from \"./lib/dates.js\";` "
+            "-- in a `compute`, a `when`, a `match` and an `available` alike. Never subtract date "
+            "strings or hand-roll `new Date()` arithmetic."
+        )
+    if _bulk_actions(spec):
+        rules.append(
+            "Every `bulkActions` entry applies to EVERY record at once and belongs in the "
+            "`bulkActions` array (`apply: (row) => ({ ... })`, no `input`); writing it as an "
+            "`actions` entry changes only the row the user clicked."
+        )
     if constants:
         rules.append(
             "Each constant is an exported `const` above `appConfig` with its comment as a "
@@ -295,16 +336,19 @@ def _config_outline(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any
     optional = [
         ("subtitleFields", _strings(spec.get("subtitle_fields"))),
         ("metaFields", _strings(spec.get("meta_fields"))),
+        ("derived", [_derived_outline(d) for d in _dicts(spec.get("derived"))]),
         ("constants", [{"name": _text(c.get("name")), "value": c.get("value"),
                         "comment": _text(c.get("comment"))} for c in _dicts(spec.get("constants"))]),
         ("filters", [_filter_outline(f) for f in _dicts(spec.get("filters"))]),
         ("badges", [{"id": _text(b.get("id")), "when": _text(b.get("rule")),
                      "tone": _text(b.get("tone")), "text": _text(b.get("text"))}
                     for b in _dicts(spec.get("badges"))]),
-        ("summary", [{"id": _text(s.get("id")), "label": _text(s.get("label")),
-                      "compute": _compute_rule(_text(s.get("rule"))),
-                      "emphasis": bool(s.get("emphasis"))} for s in _dicts(spec.get("stats"))]),
-        ("actions", [_action_outline(a) for a in _dicts(spec.get("actions"))]),
+        ("summary", [_stat_outline(s) for s in _dicts(spec.get("stats"))]),
+        ("actions", [_action_outline(a) for a in _row_actions(spec)]),
+        # A bulk action under `actions` is a per-row button: it changes the one
+        # record the user clicked and leaves every other row alone, which is
+        # exactly the failure the scope primitive exists to prevent.
+        ("bulkActions", [_bulk_action_outline(a) for a in _bulk_actions(spec)]),
     ]
     for key, value in optional:
         if value:
@@ -338,6 +382,35 @@ def _field_outline(field: Dict[str, Any]) -> Dict[str, Any]:
     return entry
 
 
+def _derived_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """One computed value in the scaffold's key names.
+
+    ``compute`` carries the English exactly as the field outline carries a
+    label: it is the one key whose value the Builder has to turn into a
+    function, and naming it the same as a stat's keeps that rule single.
+    """
+    outline: Dict[str, Any] = {
+        "name": _text(entry.get("name")),
+        "label": _text(entry.get("label")),
+        "compute": _text(entry.get("rule")),
+    }
+    if _text(entry.get("unit")):
+        outline["unit"] = _text(entry.get("unit"))
+    return outline
+
+
+def _stat_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
+    outline: Dict[str, Any] = {
+        "id": _text(entry.get("id")),
+        "label": _text(entry.get("label")),
+        "compute": _compute_rule(_text(entry.get("rule"))),
+    }
+    if _text(entry.get("unit")):
+        outline["unit"] = _text(entry.get("unit"))
+    outline["emphasis"] = bool(entry.get("emphasis"))
+    return outline
+
+
 def _filter_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
     if _text(entry.get("kind")) == "field":
         return {"kind": "field", "field": _text(entry.get("field")), "allLabel": _text(entry.get("label"))}
@@ -364,6 +437,23 @@ def _action_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
     outline["apply"] = _text(entry.get("effect"))
     if _text(entry.get("toast")):
         outline["toast"] = _text(entry.get("toast"))
+    return outline
+
+
+def _bulk_action_outline(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """One toolbar button applied to every record.
+
+    No ``input`` key exists here on purpose: a bulk apply takes the row alone,
+    so an input the spec did not ask for has nowhere to go -- and an action
+    that asks the user to type once and then rewrites every record is not what
+    any idea means by "start over".
+    """
+    outline: Dict[str, Any] = {"id": _text(entry.get("id")), "label": _text(entry.get("label"))}
+    if _text(entry.get("available_rule")):
+        outline["available"] = _text(entry.get("available_rule"))
+    if _text(entry.get("confirm_text")):
+        outline["confirm"] = _text(entry.get("confirm_text"))
+    outline["apply"] = _text(entry.get("effect"))
     return outline
 
 
@@ -651,9 +741,18 @@ def _fit(text: str, limit: int = MAX_BRIEF_CHARS) -> str:
     A brief only overruns when the spec itself is huge (a dozen journeys with
     long steps); clipping the tail is worse than nothing, so the journey
     detail goes first and only then the tail.
+
+    The two halves of a journey line are not worth the same: ``— do:`` is the
+    walk, ``— expect:`` is the assertion the Tester has to write. Both live on
+    one line, so a single ``[^\\n]*`` takes the expectation with the steps --
+    a brief one character over budget lost every assertion in the spec. Drop
+    the steps alone first, and only fall back to the blunter cuts.
     """
     if len(text) <= limit:
         return text
+    trimmed = re.sub(r" — do: .*?(?= — expect: )", "", text)
+    if len(trimmed) <= limit:
+        return trimmed
     trimmed = re.sub(r" — do: [^\n]*", "", text)
     if len(trimmed) <= limit:
         return trimmed

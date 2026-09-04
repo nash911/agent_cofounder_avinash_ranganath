@@ -62,6 +62,51 @@ def pantry_spec() -> Dict[str, Any]:
     })
 
 
+def computed_spec() -> Dict[str, Any]:
+    """A third shape: a computed value, a currency unit, and a bulk action.
+
+    None of the three can be expressed by a field, a stat rule or a row action,
+    which is why each has its own key; this spec is the smallest one that
+    carries all three at once.
+    """
+    return analyst.normalize_spec({
+        "app_name": "Value Board", "tagline": "What each record is worth",
+        "summary": "Track records and their value.", "noun": "record", "noun_plural": "records",
+        "fields": [
+            {"name": "name", "label": "Name", "kind": "text", "required": True, "options": [],
+             "unit": "", "in_form": True, "message": "Name is required."},
+            {"name": "checked", "label": "Last Checked", "kind": "date", "required": False,
+             "options": [], "unit": "", "in_form": True, "message": ""},
+            {"name": "quantity", "label": "Quantity", "kind": "number", "required": True,
+             "options": [], "unit": "", "in_form": True, "message": "Quantity is required."},
+            {"name": "price", "label": "Price", "kind": "number", "required": True,
+             "integer": False, "options": [], "unit": "£", "in_form": True,
+             "message": "Price is required."},
+        ],
+        "title_field": "name", "subtitle_fields": ["price"], "meta_fields": ["quantity"],
+        "derived": [
+            {"name": "value", "label": "Value", "rule": "Quantity times Price", "unit": "£"},
+            {"name": "age", "label": "Age", "rule": "days since Last Checked", "unit": "days"},
+        ],
+        "constants": [], "filters": [], "badges": [],
+        "stats": [{"id": "total", "label": "Total value", "rule": "sum of Value", "unit": "£",
+                   "emphasis": True},
+                  {"id": "count", "label": "Records", "rule": "count of all rows", "unit": "",
+                   "emphasis": False}],
+        "actions": [
+            {"id": "check", "label": "Check", "scope": "row", "available_rule": "",
+             "effect": "set Last Checked to today", "input_label": "", "input_required": False,
+             "confirm_text": "", "toast": "Checked"},
+            {"id": "clearAll", "label": "Clear all", "scope": "all", "available_rule": "",
+             "effect": "clear Last Checked", "input_label": "", "input_required": False,
+             "confirm_text": "Clear every record?", "toast": ""},
+        ],
+        "journeys": [{"title": "adds a record", "kind": "explicit", "steps": "fill the form",
+                      "expect": "the record is listed"}],
+        "omitted_patterns": [], "assumptions": [],
+    })
+
+
 def huge_spec(journeys: int = 26) -> Dict[str, Any]:
     """A spec big enough to overrun the brief budget if nothing trimmed it."""
     spec = books_spec()
@@ -181,9 +226,11 @@ class BuilderBriefTest(unittest.TestCase):
         self.brief = plan_mod.builder_brief(self.spec, plan_mod.derive_plan(self.spec))
 
     def test_it_fits_the_budget(self):
-        # ~2,000 tokens is the cap; the public idea measured ~750.
+        # ~2,000 tokens is the cap; the public idea measured ~750, plus the two
+        # rendering rules every config needs (no invented dialog, unit before or
+        # after the number) -- both bought with a gate failure apiece.
         self.assertLessEqual(len(self.brief), plan_mod.MAX_BRIEF_CHARS)
-        self.assertLess(len(self.brief), 4000)
+        self.assertLess(len(self.brief), 4500)
 
     def test_it_names_the_one_file_to_write(self):
         self.assertIn("## Mission: write `src/app-config.ts`", self.brief)
@@ -237,6 +284,91 @@ class BuilderBriefTest(unittest.TestCase):
         self.assertIn('"compute": "count of rows where borrower is not empty"', self.brief)
 
 
+class ComputedBulkAndUnitTest(unittest.TestCase):
+    """The three primitives a one-record config had no key for.
+
+    Each one is emitted only when the spec has that shape, so a spec without
+    them reads exactly as it did before -- the mechanism is driven by the
+    shape, never by the words a particular idea happens to use.
+    """
+
+    def setUp(self) -> None:
+        self.spec = computed_spec()
+        self.plan = plan_mod.derive_plan(self.spec)
+        self.outline = plan_mod._config_outline(self.spec, self.plan)
+        self.builder = plan_mod.builder_brief(self.spec, self.plan)
+        self.tester = plan_mod.tester_brief(self.spec, self.plan)
+
+    def test_a_computed_value_reaches_the_outline_as_its_own_entry(self):
+        self.assertEqual(self.outline["derived"], [
+            {"name": "value", "label": "Value", "compute": "Quantity times Price", "unit": "£"},
+            {"name": "age", "label": "Age", "compute": "days since Last Checked", "unit": "days"},
+        ])
+        # And never as a field the form would ask the user to fill.
+        self.assertNotIn("value", [field["name"] for field in self.outline["fields"]])
+
+    def test_a_scope_all_action_is_a_bulk_action_and_nothing_else(self):
+        self.assertEqual(self.outline["bulkActions"], [
+            {"id": "clearAll", "label": "Clear all", "confirm": "Clear every record?",
+             "apply": "clear Last Checked"},
+        ])
+        self.assertEqual([a["label"] for a in self.outline["actions"]], ["Check"])
+
+    def test_a_stat_carries_its_unit(self):
+        by_label = {stat["label"]: stat for stat in self.outline["summary"]}
+        self.assertEqual(by_label["Total value"]["unit"], "£")
+        self.assertNotIn("unit", by_label["Records"])
+
+    def test_the_builder_is_told_how_to_compute_and_where_to_put_it(self):
+        self.assertIn("compute: (row) => ...", self.builder)
+        self.assertIn('import { daysBetween, daysUntil, daysSince, today } from "./lib/dates.js";',
+                      self.builder)
+        self.assertIn("applies to EVERY record at once", self.builder)
+        self.assertIn("`bulkActions` array", self.builder)
+
+    def test_the_builder_is_told_the_unit_rule_and_never_to_invent_a_dialog(self):
+        self.assertIn("Never add `input` or `confirm` to an action unless it appears", self.builder)
+        self.assertIn("currency symbol prints before the value (`£40`)", self.builder)
+        self.assertIn("any other unit after it (`40 pts`)", self.builder)
+
+    def test_an_action_with_no_input_label_never_gets_an_input_in_the_outline(self):
+        # Measured 2026-09-04: an instant action arrived with a dialog and a
+        # confirmation the spec never asked for, and every test that clicked
+        # the button failed.
+        self.assertFalse([a for a in self.outline["actions"] if "input" in a])
+        self.assertNotIn('"input"', self.builder)
+        self.assertNotIn('"confirm"', json.dumps(self.outline["actions"]))
+
+    def test_the_tester_is_given_the_bulk_helper_and_the_rendered_examples(self):
+        self.assertIn('await runBulkAction(user, "Clear all")', self.tester)
+        self.assertIn("runBulkAction", plan_mod.TEST_HELPERS)
+        self.assertIn('the row reads "Value £40"', self.tester)
+        self.assertIn('expectRow(title, "Value £40")', self.tester)
+        self.assertIn('"£60"', self.tester)
+        self.assertIn('"40 pts"', self.tester)
+        self.assertIn('reads "Yes" or "No"', self.tester)
+        self.assertIn("never call it for a record you just added", self.tester.lower())
+        self.assertIn("const iso = (offsetDays: number)", self.tester)
+
+    def test_a_spec_without_these_shapes_is_rendered_exactly_as_before(self):
+        spec = books_spec()
+        outline = plan_mod._config_outline(spec, plan_mod.derive_plan(spec))
+        builder = plan_mod.builder_brief(spec, plan_mod.derive_plan(spec))
+        tester = plan_mod.tester_brief(spec, plan_mod.derive_plan(spec))
+        self.assertNotIn("derived", outline)
+        self.assertNotIn("bulkActions", outline)
+        self.assertNotIn("./lib/dates.js", builder)
+        self.assertNotIn("bulkActions", builder)
+        self.assertNotIn("runBulkAction(user", tester)
+        self.assertNotIn("const iso", tester)
+
+    def test_both_briefs_still_fit_their_budget_with_all_three_shapes(self):
+        self.assertLessEqual(len(self.builder), plan_mod.MAX_BRIEF_CHARS)
+        self.assertLessEqual(len(self.tester), plan_mod.MAX_BRIEF_CHARS)
+        self.assertLessEqual(len(plan_mod.combined_brief(self.spec, self.plan)),
+                             plan_mod.MAX_COMBINED_BRIEF_CHARS)
+
+
 class TesterBriefTest(unittest.TestCase):
     def setUp(self) -> None:
         self.spec = books_spec()
@@ -288,6 +420,53 @@ class TesterBriefTest(unittest.TestCase):
         self.assertIn("Running low - {quantity} left", brief)
         self.assertIn("Use one now?", brief)
         self.assertIn("Quantity is required.", brief)
+
+    def test_a_brief_just_over_budget_keeps_the_expectations(self):
+        """The steps are the first thing to go -- the assertion is the last.
+
+        Both halves of a journey line share one line, so a single line-wide
+        cut took the expectation with the walk: a brief one character over
+        budget arrived with no assertion in it at all. The Tester writes its
+        `expect(...)` from the expectation, so it survives the first cut.
+        """
+        spec = huge_spec(journeys=6)
+        # Grow the spec one journey at a time until the first cut fires. The
+        # brief is capped, so the loop watches for the cut, not the length.
+        for _ in range(40):
+            brief = plan_mod.tester_brief(spec, plan_mod.derive_plan(spec))
+            if " — do: " not in brief:
+                break
+            spec["journeys"].append(dict(
+                spec["journeys"][0],
+                title="journey number {0} that the user walks through".format(len(spec["journeys"])),
+            ))
+        else:  # pragma: no cover - the cut always fires long before 40
+            self.fail("the brief never overran its budget")
+        self.assertLessEqual(len(brief), plan_mod.MAX_BRIEF_CHARS)
+        self.assertIn(" — expect: ", brief)
+        for journey in spec["journeys"]:
+            self.assertIn(journey["title"], brief)
+
+    def test_a_days_rule_reaches_both_briefs_even_with_no_date_field(self):
+        """One test for "this idea counts days", so the two briefs agree.
+
+        The Analyst sometimes writes a date as a text field and keeps the
+        calendar in the rule ("within the next N days"). The Tester already
+        recognised that shape and got the ISO idiom; the Builder did not, and
+        hand-rolled the arithmetic the helpers exist to prevent.
+        """
+        spec = books_spec()
+        spec["fields"].append({
+            "name": "seen", "label": "Seen", "kind": "text", "required": False,
+            "options": [], "integer": False, "unit": "", "in_form": True, "message": "",
+        })
+        spec["filters"].append({
+            "kind": "state", "field": "", "id": "recent", "label": "Recent",
+            "rule": "rows where Seen is within the last 7 days", "empty_text": "None recent",
+        })
+        plan = plan_mod.derive_plan(spec)
+        self.assertIn("./lib/dates.js", plan_mod.builder_brief(spec, plan))
+        self.assertIn("const iso = (offsetDays", plan_mod.tester_brief(spec, plan))
 
     def test_an_oversized_spec_is_trimmed_but_keeps_every_title(self):
         spec = huge_spec()
