@@ -5,7 +5,6 @@
 .idea/
 temp/
 results/
-tools/
 evals/
 docs/
 node_modules
