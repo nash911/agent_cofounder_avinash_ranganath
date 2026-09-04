@@ -1,0 +1,219 @@
+{
+  "app_name": "Home Library",
+  "tagline": "Track books and who has them",
+  "summary": "A single list of books with title, author, and type; mark a book lent by entering a borrower's name and clear it on return; filter to what's out and see how many.",
+  "noun": "book",
+  "noun_plural": "books",
+  "fields": [
+    {
+      "name": "title",
+      "label": "Title",
+      "kind": "text",
+      "required": true,
+      "options": [],
+      "unit": "",
+      "in_form": true,
+      "message": "Title is required"
+    },
+    {
+      "name": "author",
+      "label": "Author",
+      "kind": "text",
+      "required": false,
+      "options": [],
+      "unit": "",
+      "in_form": true,
+      "message": ""
+    },
+    {
+      "name": "type",
+      "label": "Type",
+      "kind": "select",
+      "required": false,
+      "options": [
+        "Novel",
+        "Cookbook",
+        "Reference"
+      ],
+      "unit": "",
+      "in_form": true,
+      "message": ""
+    },
+    {
+      "name": "borrower",
+      "label": "Borrower",
+      "kind": "text",
+      "required": false,
+      "options": [],
+      "unit": "",
+      "in_form": false,
+      "message": ""
+    }
+  ],
+  "title_field": "title",
+  "subtitle_fields": [
+    "author",
+    "type"
+  ],
+  "meta_fields": [
+    "borrower"
+  ],
+  "constants": [],
+  "filters": [
+    {
+      "kind": "state",
+      "field": "borrower",
+      "id": "out",
+      "label": "Out",
+      "rule": "borrower is not empty",
+      "empty_text": "Nothing is lent out"
+    },
+    {
+      "kind": "state",
+      "field": "borrower",
+      "id": "home",
+      "label": "Home",
+      "rule": "borrower is empty",
+      "empty_text": "Everything is lent out"
+    }
+  ],
+  "badges": [
+    {
+      "id": "lent",
+      "rule": "borrower is not empty",
+      "tone": "info",
+      "text": "Out: {borrower}"
+    }
+  ],
+  "stats": [
+    {
+      "id": "lent_count",
+      "label": "Lent out",
+      "rule": "borrower is not empty",
+      "emphasis": true
+    }
+  ],
+  "actions": [
+    {
+      "id": "lend",
+      "label": "Lend",
+      "available_rule": "borrower is empty",
+      "effect": "set borrower from prompt",
+      "input_label": "Borrower name",
+      "input_required": true,
+      "confirm_text": "",
+      "toast": "Lent to {borrower}"
+    },
+    {
+      "id": "return",
+      "label": "Return",
+      "available_rule": "borrower is not empty",
+      "effect": "clear borrower",
+      "input_label": "",
+      "input_required": false,
+      "confirm_text": "",
+      "toast": "Returned"
+    }
+  ],
+  "journeys": [
+    {
+      "title": "Add a book",
+      "kind": "explicit",
+      "steps": "Open app; click add; enter title, author, type; save; see it in the list with no badge",
+      "expect": "Book appears in the list"
+    },
+    {
+      "title": "Reject empty title",
+      "kind": "explicit",
+      "steps": "Click add; leave title blank; save",
+      "expect": "Title is required message shown; record not saved"
+    },
+    {
+      "title": "Edit a book",
+      "kind": "explicit",
+      "steps": "Click a book; edit title or author or type; save",
+      "expect": "Updated values shown in list"
+    },
+    {
+      "title": "Delete a book",
+      "kind": "explicit",
+      "steps": "Click a book; delete; confirm",
+      "expect": "Book removed from list"
+    },
+    {
+      "title": "Lend a book",
+      "kind": "explicit",
+      "steps": "Click a book with no borrower; choose Lend; enter borrower name; save",
+      "expect": "Badge shows Out: borrower; Lent out stat increments"
+    },
+    {
+      "title": "Return a book",
+      "kind": "explicit",
+      "steps": "Click a book with a borrower; choose Return",
+      "expect": "Borrower cleared; badge gone; Lent out stat decrements"
+    },
+    {
+      "title": "Filter to what's out",
+      "kind": "explicit",
+      "steps": "Click Out filter",
+      "expect": "Only books with a borrower shown"
+    },
+    {
+      "title": "Filter to what's home",
+      "kind": "implied",
+      "steps": "Click Home filter",
+      "expect": "Only books with no borrower shown"
+    },
+    {
+      "title": "See how many are lent out",
+      "kind": "explicit",
+      "steps": "Look at Lent out stat",
+      "expect": "Count of books with a borrower shown"
+    },
+    {
+      "title": "Refresh persists data",
+      "kind": "implied",
+      "steps": "Reload the browser",
+      "expect": "All books, borrowers, and filters unchanged"
+    }
+  ],
+  "omitted_patterns": [
+    {
+      "pattern": "Due dates or overdue tracking",
+      "reason": "Not mentioned"
+    },
+    {
+      "pattern": "Multiple users or sharing",
+      "reason": "Stated as just me on my own computer"
+    },
+    {
+      "pattern": "Search by title or author",
+      "reason": "Not mentioned"
+    },
+    {
+      "pattern": "Borrower history",
+      "reason": "Only current borrower noted, cleared on return"
+    },
+    {
+      "pattern": "Book cover images or ISBN lookup",
+      "reason": "Not mentioned"
+    },
+    {
+      "pattern": "Sorting",
+      "reason": "Not mentioned"
+    }
+  ],
+  "assumptions": [
+    "Type options are Novel, Cookbook, and Reference as representative examples",
+    "Lend action prompts for a borrower name rather than using a select",
+    "A Home filter is implied alongside the Out filter"
+  ],
+  "implemented_features": [
+    "Single list of books with title, author, type",
+    "Lend and return actions setting and clearing borrower",
+    "Out and Home state filters on borrower",
+    "Lent out stat counting books with a borrower",
+    "Add, edit, delete records",
+    "Persistence via local storage"
+  ]
+}

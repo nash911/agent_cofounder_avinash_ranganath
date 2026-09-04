@@ -35,13 +35,30 @@ DEFAULT_OBSERVE_TIMEOUT_S = 60.0
 DEFAULT_MIN_INTERVAL_S = 60.0
 DEFAULT_FINAL_TIMEOUT_S = 15.0
 
+#: How much of a failing test's first assertion message survives into an
+#: observation. Long enough for the "Unable to find an element with the text:
+#: ..." messages that drive a repair (measured: ~300 chars including the
+#: printed DOM head), short enough that ten of them still fit a repair brief.
+MAX_FAILURE_MESSAGE_CHARS = 600
+
 _EMPTY_OBSERVATION: Dict[str, Any] = {
     "green": False,
     "total": 0,
     "passed": 0,
     "failed": 0,
     "names": [],
+    "failures": [],
 }
+
+
+def empty_observation() -> Dict[str, Any]:
+    """A fresh "nothing observed" vitest summary.
+
+    Public because :mod:`harness.observe` needs exactly this shape for the
+    runs where vitest is deliberately never spawned (tsc red, no time left).
+    """
+    return {"green": False, "total": 0, "passed": 0, "failed": 0, "names": [], "failures": []}
+
 
 #: Vitest's default reporter line: "      Tests  3 passed (3)" (green) or
 #: "Tests  1 failed | 2 passed (3)" (red). Matching "N passed" and then
@@ -85,12 +102,21 @@ def vitest_binary(app_dir: PathLike) -> pathlib.Path:
     return pathlib.Path(app_dir) / "node_modules" / ".bin" / "vitest"
 
 
-def observe(app_dir: PathLike, harness_dir: PathLike, timeout_s: float = DEFAULT_OBSERVE_TIMEOUT_S) -> Dict[str, Any]:
+def observe(
+    app_dir: PathLike,
+    harness_dir: PathLike,
+    timeout_s: float = DEFAULT_OBSERVE_TIMEOUT_S,
+    stop_event: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
     """Run vitest once against ``app_dir`` and summarize the JSON reporter output.
 
     Never raises: a spawn failure, a timeout, or an unparsable report all
     fold into the same "not green, nothing observed" shape so a flaky
     observation never takes the harness down.
+
+    ``stop_event``, when given, kills the vitest child as soon as it is set:
+    a test run is the longest thing the harness does with no model in the
+    loop, and it must not hold a shutdown past the runner's 5 s grace.
     """
     app_dir = pathlib.Path(app_dir)
     harness_dir = pathlib.Path(harness_dir)
@@ -98,7 +124,7 @@ def observe(app_dir: PathLike, harness_dir: PathLike, timeout_s: float = DEFAULT
         harness_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         warn("report observe: cannot create {0}: {1}".format(harness_dir, exc))
-        return dict(_EMPTY_OBSERVATION)
+        return empty_observation()
 
     output_file = harness_dir / "vitest.json"
     binary = vitest_binary(app_dir)
@@ -195,7 +221,11 @@ def _first_sentence(text: str) -> str:
 
 
 def compose_report(
-    spec: Optional[Dict[str, Any]], observation: Dict[str, Any], idea_text: str
+    spec: Optional[Dict[str, Any]],
+    observation: Dict[str, Any],
+    idea_text: str,
+    *,
+    status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the ``report.partial.json`` payload from an observation.
 
@@ -203,6 +233,12 @@ def compose_report(
     consulted field by field -- a spec with only ``summary`` still improves
     the summary while ``implemented_features``/``assumptions`` fall back to
     empty, rather than an all-or-nothing choice.
+
+    ``status`` defaults to ``partial``, which is what the Phase-2 single
+    session path has always written: the harness only ever *observed* a run
+    it did not drive. Missions mode drives the whole run and does know when
+    the app is finished, so it passes ``success`` (or ``failed``); anything
+    the runner would not accept (``src/result.ts``) falls back to ``partial``.
     """
     if spec:
         summary = spec.get("summary") or spec.get("tagline") or _first_sentence(idea_text)
@@ -213,17 +249,15 @@ def compose_report(
         implemented_features = []
         assumptions = []
 
-    tests_run = [
-        {"command": "npm test", "journey": name, "result": "passed"}
-        for name in observation.get("names") or []
-    ]
-
     return {
-        "status": "partial",
+        "status": status if status in VALID_STATUSES else "partial",
         "summary": summary,
         "implemented_features": implemented_features,
         "assumptions": assumptions,
-        "tests_run": tests_run,
+        # Passed journeys first, then the failed ones: a report that admits a
+        # failed journey is worth far more than one that silently drops it
+        # (AGENTS.md: "If a journey failed ... record it as failed").
+        "tests_run": tests_run_from_observation(observation) + failed_tests_run(observation),
     }
 
 
@@ -287,6 +321,7 @@ def write_report(
     *,
     expected_mtime: Any = _MISSING,
     harness_dir: Optional[PathLike] = None,
+    status: Optional[str] = None,
 ) -> bool:
     """Write ``report.partial.json`` unless the model's own report is on disk.
 
@@ -303,6 +338,8 @@ def write_report(
 
     ``harness_dir`` lets the authorship record survive in a sidecar file next
     to the harness's other artifacts, in addition to the in-process record.
+    ``status`` is passed straight to :func:`compose_report` (default
+    ``partial``); missions mode is the only caller that knows better.
     """
     report_path = pathlib.Path(app_dir) / "report.partial.json"
     if expected_mtime is _MISSING:
@@ -314,7 +351,7 @@ def write_report(
         warn("report.partial.json was written by the model; leaving it untouched")
         return False
 
-    payload = compose_report(spec, observation, idea_text)
+    payload = compose_report(spec, observation, idea_text, status=status)
     data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
     tmp_path = report_path.with_name(report_path.name + ".harness-tmp")
     try:
@@ -339,6 +376,10 @@ def write_report(
 
 VALID_RESULTS = ("passed", "failed")
 
+#: The three statuses ``normalizeResult`` in ``src/result.ts`` accepts;
+#: anything else is coerced to ``failed`` there, so the harness never emits one.
+VALID_STATUSES = ("success", "partial", "failed")
+
 
 def valid_tests_run(value: Any) -> List[Dict[str, str]]:
     """The entries the runner will keep: ``{command, journey, result}`` with a
@@ -359,10 +400,30 @@ def valid_tests_run(value: Any) -> List[Dict[str, str]]:
 
 
 def tests_run_from_observation(observation: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The ``passed`` entries only -- :func:`repair_tests_run`'s whole input,
+    since it never fires on anything but a green observation."""
     return [
         {"command": "npm test", "journey": str(name), "result": "passed"}
         for name in (observation.get("names") or [])
     ]
+
+
+def failed_tests_run(observation: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The ``failed`` entries, in the runner's own shape.
+
+    The failure message is deliberately *not* carried into ``journey``: the
+    runner shows that string as the journey's name, and a stack trace there
+    reads as a broken report. The message stays in the observation, where the
+    Repairer's brief picks it up.
+    """
+    entries: List[Dict[str, str]] = []
+    for failure in observation.get("failures") or []:
+        if not isinstance(failure, dict):
+            continue
+        name = failure.get("name")
+        if isinstance(name, str) and name:
+            entries.append({"command": "npm test", "journey": name, "result": "failed"})
+    return entries
 
 
 def repair_tests_run(

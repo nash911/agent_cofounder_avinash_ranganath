@@ -1,4 +1,4 @@
-"""``python3 -m harness`` -- the Phase 1 single-session orchestrator.
+"""``python3 -m harness`` -- the orchestrator.
 
 Invoked by ``runHarness()`` in ``src/run-challenge.ts`` with an absolute idea
 file, session root, app directory, repository root and a timeout that is already
@@ -17,8 +17,21 @@ Contract:
   filenames owned by ``verifyGeneratedApp`` and ``events.jsonl`` are never
   written here.
 
-``HARNESS_PI_BIN`` replaces the Pi binary. It exists for the fake-Pi tests and
-the integration dry run only; nothing in a judged run should set it.
+This module owns the run's *framing* -- validation, signal handling,
+credentials, the budget controller, the Analyst, the prompt-prefix check, the
+budget snapshot and the exit code -- and exactly two bodies to put between them
+(``PHASE3_DESIGN.md`` §7):
+
+- ``missions`` (the default): :func:`harness.loop.run_missions` -- Builder ∥
+  Tester, then observe → Supervisor → Repairer. It needs a usable spec, so it
+  needs a gateway key.
+- ``single``: :func:`run_single_session`, the Phase 2 all-in-one Pi session,
+  moved here unchanged. It is the fallback for every run without a key or
+  without a usable spec, and it is the path all of the pre-Phase-3 tests take.
+
+``HARNESS_MODE=single`` forces the fallback; ``HARNESS_PI_BIN`` replaces the Pi
+binary. Both exist for the fake-Pi tests and the integration dry run only;
+nothing in a judged run should set either.
 """
 
 from __future__ import annotations
@@ -27,7 +40,6 @@ import argparse
 import json
 import os
 import pathlib
-import re
 import signal
 import sys
 import threading
@@ -36,7 +48,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .budget import BudgetController
 from .log import close_file_sink, error as log_error, log, set_file_sink, warn
+from .loop import RunContext, report_spec, run_missions
 from .pirpc import PiRpc, PiRpcError, PiRpcInterrupted, base_args, pi_env
+from .plan import derive_plan
+from . import missions as missions_mod
 from . import prefix
 from . import report as report_mod
 
@@ -69,16 +84,21 @@ EXIT_CONFIG = 2
 #: 15s + 5s worst case.
 SHUTDOWN_RESERVE_S = 30.0
 
-#: Predicted output tokens for the Builder mission and each resume prompt
+#: Predicted output tokens for the single-session Builder and each resume prompt
 #: (BUILD_PLAN.md rev 6 §1, C6). Real judged runs (900s budget) always satisfy
 #: ``BudgetController.can_start`` against these; the refusal path exists for
-#: correctness, not because it is expected to fire.
+#: correctness, not because it is expected to fire. Missions mode predicts per
+#: role instead -- see ``missions.PREDICTED_OUTPUT_TOKENS``.
 BUILDER_PREDICTED_OUTPUT_TOKENS = 12000
-RESUME_PREDICTED_OUTPUT_TOKENS = 3000
 
 DEFAULT_GATEWAY_URL = "https://api.berget.ai/v1"
 DEFAULT_DIRECT_MODEL = "zai-org/GLM-5.2"
 DEFAULT_DIRECT_PROVIDER = "berget"
+
+#: The Analyst's slice of the run's wall clock. Measured 2026-09-03 (probe1,
+#: real Berget call): 444 in / 1,303 out in 42 s. 90 s leaves room for one
+#: retry without ever letting a hung gateway eat the Builder's time.
+ANALYST_MAX_S = 90.0
 
 #: Grace for the ``abort`` acknowledgement (``agent_settled`` or the response).
 ABORT_GRACE_S = 5.0
@@ -89,69 +109,31 @@ FAST_CLOSE = {"stdin_grace": 0.5, "term_grace": 1.5, "kill_grace": 1.0}
 
 SESSION_LABEL = "1-builder"
 
+#: ``HARNESS_MODE``: the missions pipeline (the default), or the Phase 2
+#: single session.
+RUN_MODES = ("missions", "single")
+
 #: Pi's exact, case-sensitive thinking levels. An unrecognised ``--thinking``
 #: makes Pi warn, ignore the flag and fall back to its own default (``medium``),
 #: which would silently turn thinking on for a judged run.
 VALID_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
-#: Pi's agent-level auto-retry (3 attempts, 2/4/8 s backoff) stays ON by default:
-#: it is what carried the measured baseline through transient 5xx responses. The
-#: per-prompt budget still bounds a wedged call. ``HARNESS_PI_AUTO_RETRY=0`` turns
-#: it off for experiments.
-PI_AUTO_RETRY_ENV = "HARNESS_PI_AUTO_RETRY"
+# The transient-error resume loop, Pi's auto-retry flag and the resume policy
+# now live in ``harness.missions`` so that every mission session and the single
+# session behave identically (PHASE3_DESIGN §5). These names stay here as thin
+# aliases: they are part of this module's tested surface.
+PI_AUTO_RETRY_ENV = missions_mod.PI_AUTO_RETRY_ENV
+RESUME_MAX_ATTEMPTS = missions_mod.RESUME_MAX_ATTEMPTS
+RESUME_BACKOFF_S = missions_mod.RESUME_BACKOFF_S
+RESUME_MIN_BUDGET_S = missions_mod.RESUME_MIN_BUDGET_S
+RESUME_PREDICTED_OUTPUT_TOKENS = missions_mod.RESUME_PREDICTED_OUTPUT_TOKENS
+RESUME_PROMPT = missions_mod.RESUME_PROMPT
+TRANSIENT_ERROR = missions_mod.TRANSIENT_ERROR
 
-#: When a run still ends on a *transient* provider error (Pi's retries exhausted,
-#: or a 503 that arrived outside its retry window) and budget remains, the harness
-#: sends one follow-up prompt per attempt so the agent continues where it stopped.
-RESUME_MAX_ATTEMPTS = 3
-RESUME_BACKOFF_S = (5.0, 10.0, 20.0)
-RESUME_MIN_BUDGET_S = 60.0
-RESUME_PROMPT = (
-    "The previous model call failed with a transient provider error and the run was "
-    "interrupted. Continue the task from exactly where you left off. Do not start over "
-    "and do not repeat work that is already done."
-)
-TRANSIENT_ERROR = re.compile(
-    r"(?<!\d)(5\d\d|429|408)(?!\d)|overload|rate.?limit|unavailable|time.?out|"
-    r"econn|epipe|socket hang up|terminated|network|fetch failed",
-    re.IGNORECASE,
-)
-
-
-def pi_auto_retry_enabled() -> bool:
-    return os.environ.get(PI_AUTO_RETRY_ENV, "1").strip() != "0"
-
-
-def is_transient_error(text: str) -> bool:
-    return bool(TRANSIENT_ERROR.search(text or ""))
-
-
-def resume_policy() -> Dict[str, Any]:
-    """Resume limits; the ``HARNESS_RESUME_*`` overrides exist for the fake-Pi tests."""
-    try:
-        attempts = int(os.environ.get("HARNESS_RESUME_ATTEMPTS", str(RESUME_MAX_ATTEMPTS)))
-    except ValueError:
-        attempts = RESUME_MAX_ATTEMPTS
-    raw_backoff = os.environ.get("HARNESS_RESUME_BACKOFF_S", "")
-    backoff: List[float] = []
-    for piece in raw_backoff.split(","):
-        piece = piece.strip()
-        if not piece:
-            continue
-        try:
-            backoff.append(max(0.0, float(piece)))
-        except ValueError:
-            backoff = []
-            break
-    try:
-        min_budget = float(os.environ.get("HARNESS_RESUME_MIN_BUDGET_S", str(RESUME_MIN_BUDGET_S)))
-    except ValueError:
-        min_budget = RESUME_MIN_BUDGET_S
-    return {
-        "attempts": max(0, attempts),
-        "backoff": tuple(backoff) or RESUME_BACKOFF_S,
-        "min_budget": max(0.0, min_budget),
-    }
+pi_auto_retry_enabled = missions_mod.pi_auto_retry_enabled
+is_transient_error = missions_mod.is_transient_error
+resume_policy = missions_mod.resume_policy
+_resume_after_transient_errors = missions_mod.resume_after_transient_errors
 
 
 def normalize_thinking(raw: Optional[str]) -> str:
@@ -218,7 +200,13 @@ def resolve_pi_binary(repository_root: pathlib.Path) -> pathlib.Path:
 
 
 def build_append_system_prompt(repository_root: pathlib.Path, app_directory: pathlib.Path) -> str:
-    """Parity with ``buildPiArguments``: system prompt, journeys, app contract."""
+    """Parity with ``buildPiArguments``: system prompt, journeys, app contract.
+
+    This is the *single-session* prefix. Missions mode builds its own, much
+    smaller one (``harness.loop.build_missions_system_prompt``): the journeys
+    checklist moved into the Analyst's prompt, and a mission's instruction is
+    its brief.
+    """
     system_prompt_path = repository_root / "solution" / "system-prompt.md"
     journeys_path = repository_root / "contract-public" / "journeys.md"
     agents_path = app_directory / "AGENTS.md"
@@ -235,6 +223,19 @@ def build_append_system_prompt(repository_root: pathlib.Path, app_directory: pat
     else:
         warn("no AGENTS.md at {0}; appending prompt without it".format(agents_path))
     return "\n\n".join(parts)
+
+
+def read_journeys(repository_root: pathlib.Path) -> str:
+    """``contract-public/journeys.md``, or ``""``.
+
+    The Analyst turns its "Behaviors to implement and test when implied" list
+    into a coverage checklist; missions themselves never see this file.
+    """
+    path = repository_root / "contract-public" / "journeys.md"
+    try:
+        return _read_text(path)
+    except OSError:
+        return ""
 
 
 def collect_extensions(repository_root: pathlib.Path) -> List[pathlib.Path]:
@@ -302,42 +303,60 @@ def resolve_credentials() -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
 
-def run_analyst(
+def build_direct_client(
     harness_directory: pathlib.Path,
-    idea: str,
     api_key: str,
     args: argparse.Namespace,
-    deadline: float,
     stop_event: Optional[threading.Event] = None,
-) -> Optional[Dict[str, Any]]:
-    """Run the Analyst (C4) if the gateway is available; ``None`` on any failure.
+) -> Any:
+    """The one :class:`~harness.gateway.GatewayClient` for the whole run, or ``None``.
 
-    Model/provider follow the same precedence as the rest of the harness:
-    the CLI flag, then the matching ``CHALLENGE_*`` env var, then the
-    contract default. Any failure here is logged and swallowed -- the Pi
-    session must proceed without a spec rather than block on it.
-
-    ``deadline`` is a small, bounded slice of the harness's own wall-clock
-    budget (see ``run()``), never the full run deadline -- a hung or
-    error-looping gateway must not be able to eat the time the Builder
-    mission needs. ``stop_event`` lets an in-flight retry backoff notice a
-    shutdown signal instead of sleeping it out.
+    Built once and shared by the Analyst, the model Supervisor and the Reviewer
+    so all three appear as one client in the usage log and against one cost
+    table. Model/provider follow the same precedence as the rest of the
+    harness: the CLI flag, then the matching ``CHALLENGE_*`` env var, then the
+    contract default.
     """
+    if _gateway is None:
+        return None
     try:
-        base_url = os.environ.get("HARNESS_GATEWAY_URL", DEFAULT_GATEWAY_URL)
-        model = args.model or os.environ.get("CHALLENGE_MODEL") or DEFAULT_DIRECT_MODEL
-        provider = args.provider or os.environ.get("CHALLENGE_PROVIDER") or DEFAULT_DIRECT_PROVIDER
-        client = _gateway.GatewayClient(
-            base_url=base_url,
+        return _gateway.GatewayClient(
+            base_url=os.environ.get("HARNESS_GATEWAY_URL", DEFAULT_GATEWAY_URL),
             api_key=api_key,
-            model=model,
-            provider=provider,
+            model=args.model or os.environ.get("CHALLENGE_MODEL") or DEFAULT_DIRECT_MODEL,
+            provider=args.provider or os.environ.get("CHALLENGE_PROVIDER") or DEFAULT_DIRECT_PROVIDER,
             harness_dir=harness_directory,
             stop_event=stop_event,
         )
-        return _analyst.run_analyst(client, idea, harness_directory, deadline=deadline)
+    except Exception as exc:  # noqa: BLE001 - the direct client is never a blocker
+        warn("direct client unavailable ({0}); continuing without one".format(exc))
+        return None
+
+
+def run_analyst(
+    harness_directory: pathlib.Path,
+    idea: str,
+    client: Any,
+    deadline: float,
+    journeys_md: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Run the Analyst (C4); ``None`` on any failure.
+
+    Any failure here is logged and swallowed -- the run must proceed without a
+    spec (in single mode) rather than block on it.
+
+    ``deadline`` is a small, bounded slice of the harness's own wall-clock
+    budget (see ``run()``), never the full run deadline -- a hung or
+    error-looping gateway must not be able to eat the time the missions need.
+    """
+    if client is None or _analyst is None:
+        return None
+    try:
+        return _analyst.run_analyst(
+            client, idea, harness_directory, deadline=deadline, journeys_md=journeys_md
+        )
     except Exception as exc:  # noqa: BLE001 - the analyst is a seed feature, never a blocker
-        warn("analyst failed ({0}); the Pi session proceeds without a spec".format(exc))
+        warn("analyst failed ({0}); the run proceeds without a spec".format(exc))
         return None
 
 
@@ -355,33 +374,90 @@ def budget_gate_active() -> bool:
     return not os.environ.get("HARNESS_PI_BIN")
 
 
-def budget_gate_reason(
-    controller: BudgetController, predicted_output_tokens: int, accept_partial: bool = False
-) -> Optional[str]:
-    """``None`` when the mission may start, else the refusal reason.
+#: ``None`` when the mission may start, else the refusal reason. A thin,
+#: directly-testable wrapper around ``controller.can_start``; ``harness.missions``
+#: owns the implementation so mission sessions and this module gate identically.
+budget_gate_reason = missions_mod.budget_gate_reason
 
-    A thin, directly-testable wrapper around ``controller.can_start`` so
-    ``test_main_wiring.py`` can exercise the refusal branch without spawning
-    a subprocess or fabricating an impossible real-time budget.
+
+def requested_mode() -> str:
+    """``HARNESS_MODE`` as given, or ``""`` when unset/invalid."""
+    requested = (os.environ.get("HARNESS_MODE") or "").strip().lower()
+    if requested and requested not in RUN_MODES:
+        warn('ignoring invalid HARNESS_MODE "{0}"'.format(requested))
+        return ""
+    return requested
+
+
+def post_analyst_output_tokens() -> int:
+    """Output tokens the run still owes after the Analyst, for its deadline.
+
+    Mode-aware, because the two bodies are an order of magnitude apart: the
+    Phase 2 session writes both files, a report and its prose in one turn
+    (12,000 predicted), while missions mode's first two turns are one file
+    each (1,500 + 1,800). Reserving the single-session figure for a missions
+    run would price the Analyst out of every budget under ~8 minutes.
     """
-    ok, reason = controller.can_start(predicted_output_tokens, accept_partial=accept_partial)
-    return None if ok else reason
+    if requested_mode() == "single":
+        return BUILDER_PREDICTED_OUTPUT_TOKENS
+    return (
+        missions_mod.BUILDER_PREDICTED_OUTPUT_TOKENS
+        + missions_mod.TESTER_PREDICTED_OUTPUT_TOKENS
+    )
+
+
+def resolve_mode(spec: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    """``(mode, reason)`` -- which body runs, and why, for the log line."""
+    if requested_mode() == "single":
+        return "single", "HARNESS_MODE=single"
+    if not spec:
+        return "single", "no usable spec"
+    return "missions", "spec with {0} journey(s)".format(len(spec.get("journeys") or []))
+
+
+#: How many unmatched ``agent_start`` timestamps are remembered. Two missions
+#: run at once; anything beyond this is a turn whose ``message_end`` never
+#: arrived (a timeout), and an unbounded memory of those would slowly shift
+#: every later turn's measurement onto a stale start.
+MAX_PENDING_TURNS = 4
 
 
 class _UsageObserver:
     """Feeds every assistant ``message_end`` into the budget controller.
 
-    Output tokens plus the wall time elapsed since the *previous*
-    ``message_end`` this observer saw -- across the whole harness process, not
-    per prompt -- is what keeps ``BudgetController.tokens_per_s`` live.
+    A turn's output tokens and the wall time *that turn* took is what keeps
+    ``BudgetController.tokens_per_s`` live. ``agent_start`` is when a session's
+    turn begins, so the pending starts are queued and each ``message_end``
+    takes the oldest one; only a message with no start left to match (a second
+    assistant message inside one turn, or the synthetic Analyst event) falls
+    back to the gap since the previous ``message_end``.
+
+    Why not the gap alone, which is what this did first: with Builder ∥ Tester
+    two turns share one wall-clock interval, so charging the second turn only
+    the gap after the first settles reports the run generating at roughly the
+    parallelism factor of its real speed -- measured 54 tok/s against an honest
+    30, which let ``can_start`` admit a mission with 75 s left that needed 90.
+
+    Every read-modify-write here is taken under a lock: missions mode calls
+    this from two mission threads at once.
     """
 
     def __init__(self, controller: BudgetController) -> None:
         self._controller = controller
         self._last_ts = time.monotonic()
+        self._lock = threading.Lock()
+        self._pending: List[float] = []
 
     def __call__(self, event: Dict[str, Any]) -> None:
-        if not isinstance(event, dict) or event.get("type") != "message_end":
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "agent_start":
+            with self._lock:
+                self._pending.append(time.monotonic())
+                del self._pending[:-MAX_PENDING_TURNS]
+            return
+        if kind != "message_end":
             return
         message = event.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
@@ -393,10 +469,12 @@ class _UsageObserver:
                 output = int(usage.get("output") or 0)
             except (TypeError, ValueError):
                 output = 0
-        now = time.monotonic()
-        elapsed = max(0.0, now - self._last_ts)
-        self._last_ts = now
-        self._controller.observe_usage(output, elapsed)
+        with self._lock:
+            now = time.monotonic()
+            started = self._pending.pop(0) if self._pending else self._last_ts
+            elapsed = max(0.0, now - started)
+            self._last_ts = now
+            self._controller.observe_usage(output, elapsed)
 
 
 def _dispatch_event(callbacks: List[Callable[[Dict[str, Any]], None]]) -> Callable[[Dict[str, Any]], None]:
@@ -463,7 +541,6 @@ def run(args: argparse.Namespace) -> int:
 
     repository_root: pathlib.Path = config["repository_root"]
     app_directory: pathlib.Path = config["app_directory"]
-    session_root: pathlib.Path = config["session_root"]
 
     append_system = build_append_system_prompt(repository_root, app_directory)
     extensions = collect_extensions(repository_root)
@@ -482,6 +559,13 @@ def run(args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             pass
 
+    def _restore_signals() -> None:
+        for number, handler in previous_handlers.items():
+            try:
+                signal.signal(number, handler)
+            except (OSError, ValueError):
+                pass
+
     # -- credentials, budget controller, analyst (C4/C6) --------------------
     api_key, key_name = resolve_credentials()
     log("credentials", "using {0}".format(key_name) if api_key else "none found")
@@ -490,6 +574,7 @@ def run(args: argparse.Namespace) -> int:
     gate_active = budget_gate_active()
 
     spec: Optional[Dict[str, Any]] = None
+    client: Any = None
     direct_disabled = os.environ.get("HARNESS_DIRECT", "").strip() == "0"
     if direct_disabled:
         log("harness", "direct client disabled (HARNESS_DIRECT=0)")
@@ -501,71 +586,166 @@ def run(args: argparse.Namespace) -> int:
         log("harness", "analyst · skipped, shutting down")
     else:
         # A small, fixed slice of the run's own budget -- never more than
-        # ~30s, and less when the Builder mission's own predicted finish
-        # already leaves little enough margin that every second counts. This
-        # is what keeps a hung/erroring gateway from eating the time the
-        # Builder mission needs (it is attempted next, regardless of whether
-        # the analyst produced a spec).
-        analyst_reserve_s = controller.predict_seconds(BUILDER_PREDICTED_OUTPUT_TOKENS) + controller.finish_margin_s
-        analyst_deadline = min(
-            time.monotonic() + 30.0, deadline - SHUTDOWN_RESERVE_S - analyst_reserve_s
+        # ANALYST_MAX_S, and less when the first mission's own predicted finish
+        # already leaves little enough margin that every second counts. This is
+        # what keeps a hung/erroring gateway from eating the time the missions
+        # need (they are attempted next, regardless of whether the analyst
+        # produced a spec).
+        analyst_reserve_s = (
+            controller.predict_seconds(post_analyst_output_tokens()) + controller.finish_margin_s
         )
+        analyst_deadline = min(
+            time.monotonic() + ANALYST_MAX_S, deadline - SHUTDOWN_RESERVE_S - analyst_reserve_s
+        )
+        client = build_direct_client(harness_directory, api_key, args, stop_event)
         spec = run_analyst(
-            harness_directory, config["idea"], api_key, args, deadline=analyst_deadline, stop_event=stop_event
+            harness_directory,
+            config["idea"],
+            client,
+            deadline=analyst_deadline,
+            journeys_md=read_journeys(repository_root),
         )
         log("harness", "analyst · {0}".format("spec produced" if spec else "no spec (continuing without one)"))
 
-    skill = repository_root / "solution" / "skills" / "mvp-builder"
+    context = RunContext(
+        args=args,
+        idea=config["idea"],
+        repository_root=repository_root,
+        app_directory=app_directory,
+        session_root=config["session_root"],
+        harness_directory=harness_directory,
+        pi_binary=config["pi_binary"],
+        extensions=extensions,
+        child_env=child_environment(harness_directory, extensions),
+        append_system=append_system,
+        thinking=normalize_thinking(args.thinking),
+        deadline=deadline,
+        stop_event=stop_event,
+        signalled=signalled,
+        controller=controller,
+        gate_active=gate_active,
+        spec=spec,
+        client=client,
+        restore_signals=_restore_signals,
+    )
+
+    mode, reason = resolve_mode(spec)
+    log("harness", "mode · {0} ({1})".format(mode, reason))
+    try:
+        if mode == "missions":
+            # Missions mode has no ReportWatcher: no mission has a `bash` tool,
+            # so nothing in a session can run vitest for the watcher to notice.
+            context.usage_observer = _dispatch_event([_UsageObserver(controller)])
+            return finalize(harness_directory, controller, run_missions(context))
+        return run_single_session(context)
+    finally:
+        # Both bodies restore the handlers themselves once their last session is
+        # closed; this is the backstop for a body that raised before it could.
+        _restore_signals()
+
+
+def finalize(
+    harness_directory: pathlib.Path, controller: BudgetController, success: bool
+) -> int:
+    """The prefix check (C5), the budget snapshot (C6), and the exit code.
+
+    Shared by both run bodies so a judged run's artifacts are the same shape
+    whichever one ran.
+    """
+    prefix.check(payload_log_path(harness_directory))
+
+    snapshot = controller.snapshot()
+    predicted_total_s = sum(p.get("predicted_s", 0.0) for p in snapshot["predictions"])
+    actual_total_s = sum(p.get("actual_s", 0.0) for p in snapshot["predictions"])
+    log(
+        "budget",
+        "elapsed={0:.0f}s output={1} peak={2} tok/s={3:.1f} predicted={4:.0f}s actual={5:.0f}s".format(
+            snapshot["elapsed_s"], snapshot["cumulative_output"], snapshot["peak_output"],
+            snapshot["tokens_per_s"], predicted_total_s, actual_total_s,
+        ),
+    )
+    try:
+        (harness_directory / "budget.json").write_text(
+            json.dumps(snapshot, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        warn("could not write budget.json: {0}".format(exc))
+
+    log("harness", "exit {0} ({1})".format(
+        EXIT_SUCCESS if success else EXIT_FAILURE,
+        "success" if success else "no usable assistant turn",
+    ))
+    return EXIT_SUCCESS if success else EXIT_FAILURE
+
+
+def run_single_session(context: RunContext) -> int:
+    """The Phase 2 all-in-one Pi session: one prompt, the model does the rest.
+
+    Unchanged from Phase 2 apart from taking its inputs off ``context``: this
+    is the proven path, the fallback whenever there is no usable spec, and the
+    one every pre-Phase-3 test exercises.
+    """
+    args = context.args
+    deadline = context.deadline
+    stop_event = context.stop_event
+    controller = context.controller
+    harness_directory = context.harness_directory
+    app_directory = context.app_directory
+
+    skill = context.repository_root / "solution" / "skills" / "mvp-builder"
     if not skill.is_dir():
         warn("skill directory not found at {0}; running without it".format(skill))
         skill_argument: Optional[pathlib.Path] = None
     else:
         skill_argument = skill
 
-    thinking = normalize_thinking(args.thinking)
-    session_dir = session_root / SESSION_LABEL
+    session_dir = context.session_root / SESSION_LABEL
     pi_arguments = base_args(
-        append_system=append_system,
+        append_system=context.append_system,
         session_dir=session_dir,
-        extensions=list(extensions),
+        extensions=list(context.extensions),
         skill=skill_argument,
         provider=args.provider,
         model=args.model,
-        thinking=thinking,
+        thinking=context.thinking,
     )
 
     log(
         "harness",
         "session {0} · thinking={1} · budget={2:.0f}s · cwd={3}".format(
-            SESSION_LABEL, thinking, args.timeout_ms / 1000.0, app_directory
+            SESSION_LABEL, context.thinking, args.timeout_ms / 1000.0, app_directory
         ),
     )
 
-    if gate_active:
+    if context.gate_active:
         refusal = budget_gate_reason(controller, BUILDER_PREDICTED_OUTPUT_TOKENS)
         if refusal is not None:
             log_error("budget · cannot start Builder mission: {0}".format(refusal))
-            for signum, handler in previous_handlers.items():
-                try:
-                    signal.signal(signum, handler)
-                except (OSError, ValueError):
-                    pass
+            context.restore_signals()
             return EXIT_FAILURE
+
+    # The v2 spec no longer carries ``implemented_features`` -- the Architect
+    # derives them -- so a harness-authored fallback report would come back
+    # with an empty feature list. Deriving the plan here (a pure function, no
+    # model call) restores exactly what Phase 2's report had.
+    spec_for_report = context.spec
+    if spec_for_report:
+        spec_for_report = report_spec(spec_for_report, derive_plan(spec_for_report))
 
     report_watcher = report_mod.ReportWatcher(
         app_dir=app_directory,
         harness_dir=harness_directory,
-        idea_text=config["idea"],
-        spec=spec,
+        idea_text=context.idea,
+        spec=spec_for_report,
     )
     usage_observer = _UsageObserver(controller)
     on_event = _dispatch_event([usage_observer, report_watcher.on_event])
 
     client = PiRpc(
-        pi_bin=config["pi_binary"],
+        pi_bin=context.pi_binary,
         args=pi_arguments,
         cwd=app_directory,
-        env=child_environment(harness_directory, extensions),
+        env=dict(context.child_env),
         session_dir=session_dir,
         label=SESSION_LABEL,
         stderr_path=harness_directory / "{0}.stderr.log".format(SESSION_LABEL),
@@ -592,7 +772,7 @@ def run(args: argparse.Namespace) -> int:
 
         if not stop_event.is_set():
             budget = max(1.0, deadline - time.monotonic() - SHUTDOWN_RESERVE_S)
-            prompt_text = "## Product idea\n\n" + config["idea"] + "\n"
+            prompt_text = "## Product idea\n\n" + context.idea + "\n"
             mission = controller.begin_mission("builder", BUILDER_PREDICTED_OUTPUT_TOKENS)
             try:
                 result = client.prompt(prompt_text, timeout=budget, on_event=on_event)
@@ -610,17 +790,13 @@ def run(args: argparse.Namespace) -> int:
             if not result.get("interrupted"):
                 result = _resume_after_transient_errors(
                     client, result, deadline, stop_event,
-                    controller=controller, gate_active=gate_active, on_event=on_event,
+                    controller=controller, gate_active=context.gate_active, on_event=on_event,
                 )
         else:
             result["interrupted"] = True
     finally:
         _shutdown(client, result, stop_event)
-        for signum, handler in previous_handlers.items():
-            try:
-                signal.signal(signum, handler)
-            except (OSError, ValueError):
-                pass
+        context.restore_signals()
 
     # The session total: the initial prompt plus every resume prompt.
     usage = client.total
@@ -628,8 +804,8 @@ def run(args: argparse.Namespace) -> int:
         log("usage", " ".join("{0}={1}".format(k, v) for k, v in usage.as_dict().items()))
     if result.get("resume_attempts"):
         log("harness", "resumed after transient provider errors {0} time(s)".format(result["resume_attempts"]))
-    if signalled:
-        log("harness", "received {0}; shut the session down early".format(signalled[0]))
+    if context.signalled:
+        log("harness", "received {0}; shut the session down early".format(context.signalled[0]))
     if result.get("error"):
         log_error("last error: {0}".format(result["error"]))
     log(
@@ -652,7 +828,7 @@ def run(args: argparse.Namespace) -> int:
     # so a real OS signal skips this step outright rather than risking it.
     report_path = app_directory / "report.partial.json"
     needs_final_report = bool(result.get("interrupted")) or bool(result.get("timed_out")) or not report_path.is_file()
-    if signalled:
+    if context.signalled:
         log("report", "final observe skipped (signal received); shutdown must stay fast")
     elif needs_final_report:
         observation = report_watcher.final_observe()
@@ -673,118 +849,7 @@ def run(args: argparse.Namespace) -> int:
         if repaired is not None:
             log("report", "repaired tests_run from vitest ({0} entries); model prose kept".format(repaired))
 
-    # -- prompt-prefix byte-identity check (C5) --------------------------
-    prefix.check(payload_log_path(harness_directory))
-
-    # -- budget snapshot (C6) --------------------------------------------
-    snapshot = controller.snapshot()
-    predicted_total_s = sum(p.get("predicted_s", 0.0) for p in snapshot["predictions"])
-    actual_total_s = sum(p.get("actual_s", 0.0) for p in snapshot["predictions"])
-    log(
-        "budget",
-        "elapsed={0:.0f}s output={1} peak={2} tok/s={3:.1f} predicted={4:.0f}s actual={5:.0f}s".format(
-            snapshot["elapsed_s"], snapshot["cumulative_output"], snapshot["peak_output"],
-            snapshot["tokens_per_s"], predicted_total_s, actual_total_s,
-        ),
-    )
-    try:
-        (harness_directory / "budget.json").write_text(
-            json.dumps(snapshot, indent=2) + "\n", encoding="utf-8"
-        )
-    except OSError as exc:
-        warn("could not write budget.json: {0}".format(exc))
-
-    success = bool(result.get("success"))
-    log("harness", "exit {0} ({1})".format(EXIT_SUCCESS if success else EXIT_FAILURE, "success" if success else "no usable assistant turn"))
-    return EXIT_SUCCESS if success else EXIT_FAILURE
-
-
-def _resume_after_transient_errors(
-    client: PiRpc,
-    result: Dict[str, Any],
-    deadline: float,
-    stop_event: threading.Event,
-    *,
-    controller: Optional[BudgetController] = None,
-    gate_active: bool = False,
-    on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
-) -> Dict[str, Any]:
-    """Follow up a run that settled on a transient provider error, within budget.
-
-    Each attempt waits a backoff (polled in <=0.25 s slices so SIGTERM is still
-    observed), then sends :data:`RESUME_PROMPT` into the same session. The
-    returned result is the latest prompt's, with ``success`` carried forward if
-    any earlier prompt already produced a usable assistant turn.
-
-    When ``controller`` is given and ``gate_active``, each attempt also asks
-    ``BudgetController.can_start(RESUME_PREDICTED_OUTPUT_TOKENS,
-    accept_partial=False)`` (C6) before sending; a refusal stops resuming (it
-    does not fail the run -- whatever the session already produced stands).
-    """
-    policy = resume_policy()
-    attempts = 0
-    while (
-        not stop_event.is_set()
-        and result.get("settled")
-        and result.get("stop_reason") == "error"
-        and is_transient_error(str(result.get("error") or ""))
-        and attempts < policy["attempts"]
-    ):
-        backoff = policy["backoff"][min(attempts, len(policy["backoff"]) - 1)]
-        remaining = deadline - time.monotonic() - SHUTDOWN_RESERVE_S - backoff
-        if remaining < policy["min_budget"]:
-            log(
-                "harness",
-                "not resuming after '{0}': {1:.0f}s of budget left".format(
-                    result.get("error"), max(0.0, remaining)
-                ),
-            )
-            break
-        if controller is not None and gate_active:
-            refusal = budget_gate_reason(
-                controller, RESUME_PREDICTED_OUTPUT_TOKENS, accept_partial=False
-            )
-            if refusal is not None:
-                log("budget", "not resuming: {0}".format(refusal))
-                break
-        attempts += 1
-        log(
-            "harness",
-            "transient provider error '{0}' · resuming in {1:.0f}s (attempt {2}/{3})".format(
-                result.get("error"), backoff, attempts, policy["attempts"]
-            ),
-        )
-        waited = 0.0
-        while waited < backoff and not stop_event.is_set():
-            slice_s = min(0.25, backoff - waited)
-            stop_event.wait(slice_s)
-            waited += slice_s
-        if stop_event.is_set():
-            result["interrupted"] = True
-            break
-        previous_success = bool(result.get("success"))
-        mission = (
-            controller.begin_mission("resume-{0}".format(attempts), RESUME_PREDICTED_OUTPUT_TOKENS)
-            if controller is not None
-            else None
-        )
-        try:
-            follow = client.prompt(RESUME_PROMPT, timeout=max(1.0, remaining), on_event=on_event)
-        except PiRpcInterrupted:
-            result["interrupted"] = True
-            break
-        except PiRpcError as exc:
-            result["error"] = str(exc)
-            break
-        if controller is not None and mission is not None:
-            follow_usage = follow.get("usage")
-            controller.end_mission(
-                mission, getattr(follow_usage, "output", 0) or 0, follow.get("wall_s", 0.0) or 0.0
-            )
-        follow["success"] = bool(follow.get("success")) or previous_success
-        result = follow
-    result["resume_attempts"] = attempts
-    return result
+    return finalize(harness_directory, controller, bool(result.get("success")))
 
 
 def _shutdown(client: PiRpc, result: Dict[str, Any], stop_event: threading.Event) -> None:
